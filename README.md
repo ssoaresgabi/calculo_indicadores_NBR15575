@@ -8,9 +8,9 @@ então cada modelo precisa das duas simulações:
 | Modelo | Simulação | Output do EnergyPlus |
 |---|---|---|
 | Referência | ventilação natural | `Zone Operative Temperature` |
-| Referência | ar-condicionado | `Zone Ideal Loads Zone Total Cooling Energy` e `... Total Heating Energy` |
+| Referência | ar-condicionado | `Zone Ideal Loads Zone Total Cooling Energy` e `Zone Ideal Loads Zone Total Heating Energy` |
 | Real | ventilação natural | `Zone Operative Temperature` |
-| Real | ar-condicionado | as duas cargas |
+| Real | ar-condicionado | `Zone Ideal Loads Zone Total Cooling Energy` e `Zone Ideal Loads Zone Total Heating Energy` |
 
 Aceita `.csv`, `.xlsx` e `.xlsm`. Os cabeçalhos são lidos no formato nativo do EnergyPlus:
 
