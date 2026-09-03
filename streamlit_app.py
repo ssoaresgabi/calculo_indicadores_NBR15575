@@ -407,7 +407,7 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     )
 
 
-st.set_page_config(page_title="NBR 15575 — Desempenho térmico", layout="wide")
+st.set_page_config(page_title="NBR 15575 - Desempenho térmico", layout="wide")
 
 AQUI = Path(__file__).parent
 
