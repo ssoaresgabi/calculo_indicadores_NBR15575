@@ -16,16 +16,10 @@ import streamlit as st
 HORAS_ANO = 8760
 JOULE_POR_KWH = 3_600_000
 
-# ---------------------------------------------------------------------------
 # Ocupação
-# ---------------------------------------------------------------------------
-
 OCUPACAO = {
-    # Sala/estar: 14h às 22h  → 2.920 h/ano
     "sala": [0] * 14 + [1] * 8 + [0] * 2,
-    # Dormitório: 00h às 08h e 22h às 24h → 3.650 h/ano
     "dormitorio": [1] * 8 + [0] * 14 + [1] * 2,
-    # Misto (sala + dormitório conjugados): 00h-08h e 14h-24h → 6.570 h/ano
     "misto": [1] * 8 + [0] * 6 + [1] * 10,
 }
 
@@ -54,16 +48,11 @@ class Intervalo:
 INTERVALOS = {
     1: Intervalo(1, "TBSm < 25 °C", 18.0, 26.0, 26.0, 18.0, True),
     2: Intervalo(2, "25 °C ≤ TBSm < 27 °C", None, 28.0, 28.0, None, False),
-    # ATENÇÃO: a planilha oficial usa To < 28 para o PHFT do intervalo 3 e
-    # To >= 30 para a carga de refrigeração. Ver nota em LEIAME.md.
     3: Intervalo(3, "TBSm ≥ 27 °C", None, 28.0, 30.0, None, False),
 }
 
 
-# ---------------------------------------------------------------------------
-# Zoneamento bioclimático
-# ---------------------------------------------------------------------------
-
+# Zoneamento bioclimático (ABNT NBR 15220-3:2024)
 @dataclass(frozen=True)
 class ZonaBioclimatica:
     codigo: str
@@ -92,12 +81,6 @@ def classificar_zona_bioclimatica(
     tbsm: float, ur: float,
     latitude: float | None = None, longitude: float | None = None,
 ) -> str:
-    """
-    Classifica a zona bioclimática (NBR 15220-3:2024, 5.2) a partir da TBSm
-    (temperatura média anual de bulbo seco externa, °C) e da UR (umidade
-    relativa média anual externa, %). Latitude/longitude só decidem 1R×1M e
-    2R×2M - fora dessas duas faixas de TBSm são ignoradas.
-    """
     if tbsm < 18.8:
         if latitude is not None:
             if -30.0 <= latitude <= -27.2 and tbsm < 17.0:
@@ -286,7 +269,7 @@ class ResultadoUH:
 
 def calcular_app(app: APP, to: pd.Series, cgtr: pd.Series | None,
                  cgta: pd.Series | None, intervalo: Intervalo) -> ResultadoAPP:
-    """Aplica, hora a hora, as mesmas condições das colunas de cálculo da planilha."""
+    """Aplica os critérios hora a hora para um APP."""
     n = len(to)
     ocup = perfil_ocupacao(app.tipo, n) > 0
 
@@ -319,10 +302,7 @@ def calcular_app(app: APP, to: pd.Series, cgtr: pd.Series | None,
 
 
 def consolidar_uh(resultados: list[ResultadoAPP], areas: list[float]) -> ResultadoUH:
-    """
-    Consolidação idêntica às macros da planilha:
-    PHFT = média aritmética · cargas = soma · Tomáx = máximo · Tomín = mínimo.
-    """
+    """PHFT = média aritmética; cargas = soma; Tomáx = máximo; Tomín = mínimo."""
     if not resultados:
         raise ValueError("Nenhum APP informado.")
     return ResultadoUH(
@@ -365,7 +345,7 @@ class Classificacao:
 
 
 def _fmt_pct(v):
-    return "—" if v is None else f"{v * 100:.2f}%"
+    return "-" if v is None else f"{v * 100:.2f}%"
 
 
 def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: str,
@@ -379,47 +359,34 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     lim_tomax = ref.tomax + folga
     ok_tomax = real.tomax <= lim_tomax
 
-    # zona_bioclimatica: código novo (1R,1M,2R,2M,3A,3B,4A,4B,5A,5B,6A,6B) da
-    # NBR 15220-3:2024. Ver nota em ZONAS_BIOCLIMATICAS sobre a fonte de
-    # avalia_tomin.
     avalia_tomin = ZONAS_BIOCLIMATICAS[zona_bioclimatica].avalia_tomin
     lim_tomin = ref.tomin - 1.0
     ok_tomin = (real.tomin >= lim_tomin) if avalia_tomin else None
 
     minimo = ok_phft_min and ok_tomax and (ok_tomin is not False)
 
-    # ---- ΔPHFT ------------------------------------------------------------
     a, b = COEF_DELTA_PHFT[chave]
     delta_phft_min = 0.0 if ref.phft >= 0.7 else (a - b * ref.phft * 100) / 100
     delta_phft = real.phft - ref.phft
     ok_delta = delta_phft >= delta_phft_min
 
-    # ---- RedCgTT ----------------------------------------------------------
     if ref.area and ref.area > 0:
         cgtt_area = ref.cgtt / ref.area
         alto = cgtt_area >= 100
     else:
         cgtt_area = None
-        alto = True  # sem área declarada, cai no limiar mais exigente
+        alto = True
 
     int_baixo, int_alto, sup_baixo, sup_alto = RED_CGTT[chave]
     red_int = 0.0 if ref.phft < 0.7 else (int_alto if alto else int_baixo)
     red_sup = sup_alto if alto else sup_baixo
     red_cgtt = 1 - (real.cgtt / ref.cgtt) if ref.cgtt else 0.0
 
-    # RedCgTT ≥ RedCgTTmín (tabela de critérios da norma). A planilha oficial
-    # usa ">" estrito nas três abas de intervalo - divergência dela em
-    # relação à norma, não repetida aqui.
     ok_red_int = red_cgtt >= red_int
     ok_red_sup = red_cgtt >= red_sup
 
     intermediario = minimo and ok_delta and ok_red_int
     superior = minimo and ok_delta and ok_red_sup
-    # Regra do PHFT >= 95%: não é uma opção do usuário, é a própria norma
-    # (11.4.4) - "o nível superior de desempenho térmico pode ser obtido se
-    # o PHFTUH do modelo real for igual ou superior a 95%", desde que
-    # também sejam atendidos os critérios de Tomáx/Tomín do nível mínimo.
-    # Por isso é sempre aplicada, sem checkbox.
     if minimo and real.phft >= 0.95:
         superior = True
 
@@ -472,14 +439,6 @@ AQUI = Path(__file__).parent
 
 @st.cache_data
 def carregar_climas() -> pd.DataFrame | None:
-    """climas.csv é opcional: sem ele, o clima é informado manualmente.
-
-    Valida se as zonas do arquivo são do esquema novo (NBR 15220-3:2024,
-    1R a 6B) - um climas.csv antigo (zonas numéricas 1 a 8, de antes da
-    atualização da ferramenta) não é compatível com ZONAS_BIOCLIMATICAS e
-    quebraria a classificação mais adiante, então essas linhas são
-    descartadas aqui, com aviso, em vez de deixar o erro estourar depois.
-    """
     caminho = AQUI / "climas.csv"
     if not caminho.exists():
         return None
@@ -489,11 +448,7 @@ def carregar_climas() -> pd.DataFrame | None:
         return None
 
     if "cidade" not in df.columns or "zona_bioclimatica" not in df.columns:
-        st.sidebar.warning(
-            "climas.csv não tem as colunas esperadas (cidade, "
-            "zona_bioclimatica, ...) - ignorando o arquivo. Confira se é a "
-            "versão nova, enviada junto com este streamlit_app.py."
-        )
+        st.sidebar.warning("climas.csv não tem as colunas esperadas - ignorando o arquivo.")
         return None
 
     zonas_validas = df["zona_bioclimatica"].astype(str).isin(ZONAS_BIOCLIMATICAS)
@@ -501,10 +456,7 @@ def carregar_climas() -> pd.DataFrame | None:
         n_invalidas = int((~zonas_validas).sum())
         st.sidebar.warning(
             f"climas.csv tem {n_invalidas} cidade(s) com zona bioclimática "
-            "fora do padrão NBR 15220-3:2024 (1R, 1M, 2R, 2M, 3A, 3B, 4A, "
-            "4B, 5A, 5B, 6A, 6B) - essas linhas foram ignoradas. Isso "
-            "costuma acontecer quando o climas.csv é de uma versão antiga "
-            "da ferramenta; use o que veio junto com este streamlit_app.py."
+            "fora do padrão NBR 15220-3:2024 - essas linhas foram ignoradas."
         )
         df = df[zonas_validas].reset_index(drop=True)
 
@@ -580,10 +532,6 @@ with st.sidebar:
         st.caption("climas.csv não encontrado - informe TBSm e UR manualmente.")
     modo = st.radio("Definição do clima", opcoes)
     if modo == "Escolher cidade":
-        # climas.csv traz as 29 cidades da NBR 15220-3:2024 (27 capitais +
-        # Canela/RS e Petrolina/PE, as duas representativas que não são
-        # capital) - não é a lista completa dos 5 507 municípios (essa está
-        # na ABNT TR 15220-3-1, não normativa e não incluída aqui).
         cidade = st.selectbox("Cidade", climas["cidade"].tolist(),
                               index=int(climas.index[climas["cidade"] == "Florianopolis/SC"][0])
                               if "Florianopolis/SC" in climas["cidade"].values else 0)
@@ -611,14 +559,13 @@ with st.sidebar:
     if info_zona is None:
         st.error(
             f"Zona bioclimática '{zb}' não reconhecida (esperado: 1R, 1M, "
-            "2R, 2M, 3A, 3B, 4A, 4B, 5A, 5B, 6A ou 6B). Se veio do "
-            "climas.csv, confira se o arquivo é a versão nova da ferramenta."
+            "2R, 2M, 3A, 3B, 4A, 4B, 5A, 5B, 6A ou 6B)."
         )
         st.stop()
     num_intervalo = info_zona.intervalo
     intervalo = INTERVALOS[num_intervalo]
     st.info(
-        f"Zona bioclimática {zb} — {info_zona.descricao}\n\n"
+        f"Zona bioclimática {zb} - {info_zona.descricao}\n\n"
         f"Intervalo {intervalo.numero} - {intervalo.descricao}"
     )
 
@@ -652,10 +599,7 @@ st.subheader("Ambientes de permanência prolongada")
 st.caption("Marque apenas os APP. Banheiros, circulações e cozinhas ficam de fora.")
 st.caption(
     "Use **misto** para o APP que funciona como sala e dormitório no mesmo "
-    "espaço (quitinetes, lofts, studios): a norma exige um padrão de "
-    "ocupação próprio para ele (dormindo/descansando 00h-08h e 22h-24h, "
-    "sentado/TV 14h-22h), diferente de marcá-lo apenas como sala ou só "
-    "como dormitório."
+    "espaço (quitinetes, lofts, studios)."
 )
 
 config = pd.DataFrame({
@@ -683,10 +627,7 @@ if not apps:
     st.stop()
 
 if sum(a.area for a in apps) <= 0:
-    st.error(
-        "Informe a área útil dos APP. Sem ela não dá para calcular CgTT,ref/área, "
-        "que define se a redução exigida no nível superior é de 35% ou 55%."
-    )
+    st.error("Informe a área útil dos APP.")
     st.stop()
 
 res_ref = resultados_modelo(to_ref, cargas_ref, apps, intervalo)
@@ -704,17 +645,6 @@ st.subheader("Nível de desempenho")
 cor = {"Superior": "🟢", "Intermediário": "🔵", "Mínimo": "🟡"}.get(cls.nivel, "🔴")
 st.markdown(f"## {cor} {cls.nivel}")
 
-linhas = []
-for nivel, criterios in cls.criterios.items():
-    for k in criterios:
-        linhas.append({
-            "Nível": nivel,
-            "Critério": k.nome,
-            "Verificação": k.texto,
-            "Atende": "—" if k.atende is None else ("Sim" if k.atende else "Não"),
-        })
-st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
-
 with st.expander("Resultados por APP"):
     for rotulo, res in (("Referência", res_ref), ("Real", res_real)):
         st.markdown(f"**{rotulo}**")
@@ -727,23 +657,3 @@ with st.expander("Resultados por APP"):
             "Tomín [°C]": f"{a.tomin:.2f}",
             "Horas ocupadas": a.horas_ocupadas,
         } for a in res.apps]), hide_index=True, use_container_width=True)
-
-with st.expander("Parâmetros aplicados"):
-    st.write({
-        "Faixa de PHFT": (f"To < {intervalo.to_max} °C" if intervalo.to_min is None
-                          else f"{intervalo.to_min} °C < To < {intervalo.to_max} °C"),
-        "CgTR contabilizada quando": f"To ≥ {intervalo.limite_cgtr} °C",
-        "CgTA contabilizada quando": (f"To ≤ {intervalo.limite_cgta} °C"
-                                      if intervalo.avalia_aquecimento else "não avaliada"),
-        "CgTT,ref / área": (f"{cls.cgtt_por_area:.1f} kWh/(ano·m²)"
-                            if cls.cgtt_por_area else "—"),
-        "ΔPHFT mínimo": f"{cls.delta_phft_min * 100:.2f}%",
-        "RedCgTT mínima (intermediário)": f"{cls.red_cgtt_int * 100:.2f}%",
-        "RedCgTT mínima (superior)": f"{cls.red_cgtt_sup * 100:.2f}%",
-    })
-
-st.download_button(
-    "Baixar resultados (CSV)",
-    pd.DataFrame(linhas).to_csv(index=False).encode("utf-8"),
-    file_name="nbr15575_resultados.csv", mime="text/csv",
-)
