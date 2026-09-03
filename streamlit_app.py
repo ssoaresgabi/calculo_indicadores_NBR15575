@@ -43,7 +43,7 @@ def perfil_ocupacao(tipo: str, n_horas: int = HORAS_ANO) -> pd.Series:
 class Intervalo:
     numero: int
     descricao: str
-    to_min: float | None      # limite inferior da faixa
+    to_min: float | None      # limite inferior da faixa (None = não avaliado)
     to_max: float             # limite superior da faixa, para o PHFT
     limite_cgtr: float        # To a partir do qual a carga de refrigeração conta
     limite_cgta: float | None # To até o qual a carga de aquecimento conta
@@ -60,7 +60,7 @@ INTERVALOS = {
 
 
 # ---------------------------------------------------------------------------
-# Níveis de desempenho
+# Limiares dos níveis de desempenho
 # ---------------------------------------------------------------------------
 # ΔPHFT mínimo quando PHFT_ref < 70%: (a - b*PHFT_ref*100)/100
 COEF_DELTA_PHFT = {
@@ -407,7 +407,7 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     )
 
 
-st.set_page_config(page_title="NBR 15575 - Desempenho térmico", layout="wide")
+st.set_page_config(page_title="NBR 15575 — Desempenho térmico", layout="wide")
 
 AQUI = Path(__file__).parent
 
@@ -509,7 +509,6 @@ with st.sidebar:
     tipologia = st.radio("Tipologia", ["Unifamiliar", "Multifamiliar"])
     pavimento = st.selectbox("Pavimento", PAVIMENTOS,
                              disabled=(tipologia == "Unifamiliar"))
-    )
 
 col_ref, col_real = st.columns(2)
 with col_ref:
