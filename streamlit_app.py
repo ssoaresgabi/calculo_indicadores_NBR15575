@@ -19,12 +19,13 @@ JOULE_POR_KWH = 3_600_000
 # ---------------------------------------------------------------------------
 # Ocupação
 # ---------------------------------------------------------------------------
-# Índice 0 = hora encerrada às 01:00.
 OCUPACAO = {
     # Sala/estar: 14h às 22h  → 2.920 h/ano
     "sala": [0] * 14 + [1] * 8 + [0] * 2,
     # Dormitório: 00h às 08h e 22h às 24h → 3.650 h/ano
     "dormitorio": [1] * 8 + [0] * 14 + [1] * 2,
+    # Misto (sala + dormitório conjugados): 00h-08h e 14h-24h → 6.570 h/ano
+    "misto": [1] * 8 + [0] * 6 + [1] * 10,
 }
 
 
@@ -42,7 +43,7 @@ def perfil_ocupacao(tipo: str, n_horas: int = HORAS_ANO) -> pd.Series:
 class Intervalo:
     numero: int
     descricao: str
-    to_min: float | None      # limite inferior da faixa (None = não avaliado)
+    to_min: float | None      # limite inferior da faixa
     to_max: float             # limite superior da faixa, para o PHFT
     limite_cgtr: float        # To a partir do qual a carga de refrigeração conta
     limite_cgta: float | None # To até o qual a carga de aquecimento conta
@@ -59,7 +60,7 @@ INTERVALOS = {
 
 
 # ---------------------------------------------------------------------------
-# Limiares dos níveis de desempenho
+# Níveis de desempenho
 # ---------------------------------------------------------------------------
 # ΔPHFT mínimo quando PHFT_ref < 70%: (a - b*PHFT_ref*100)/100
 COEF_DELTA_PHFT = {
@@ -196,7 +197,7 @@ class APP:
     """Ambiente de permanência prolongada."""
     nome: str
     zona: str
-    tipo: Literal["sala", "dormitorio"]
+    tipo: Literal["sala", "dormitorio", "misto"]
     area: float
 
 
@@ -308,12 +309,16 @@ def _fmt_pct(v):
 
 
 def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: str,
-                zona_bioclimatica: int, aplicar_regra_phft_95: bool = False) -> Classificacao:
+                zona_bioclimatica: int) -> Classificacao:
     chave = chave_tipologia(tipologia, pavimento)
 
     # ---- nível mínimo -----------------------------------------------------
+    # Tabela 4 da NBR 15575-1: "PHFTUH,real > 0,9.PHFTUH,ref" - comparação
+    # estrita. A planilha oficial usa ">=" na aba do intervalo 1 e ">" nas
+    # abas dos intervalos 2 e 3 (inconsistência interna dela); o texto da
+    # norma vale para os três intervalos, então usamos ">" sempre.
     lim_phft_min = 0.9 * ref.phft
-    ok_phft_min = real.phft >= lim_phft_min
+    ok_phft_min = real.phft > lim_phft_min
 
     folga = 2.0 if (chave == "unifamiliar" or pavimento == "Cobertura") else 1.0
     lim_tomax = ref.tomax + folga
@@ -344,12 +349,20 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     red_sup = sup_alto if alto else sup_baixo
     red_cgtt = 1 - (real.cgtt / ref.cgtt) if ref.cgtt else 0.0
 
-    ok_red_int = red_cgtt > red_int
-    ok_red_sup = red_cgtt > red_sup
+    # RedCgTT ≥ RedCgTTmín (tabela de critérios da norma). A planilha oficial
+    # usa ">" estrito nas três abas de intervalo - divergência dela em
+    # relação à norma, não repetida aqui.
+    ok_red_int = red_cgtt >= red_int
+    ok_red_sup = red_cgtt >= red_sup
 
     intermediario = minimo and ok_delta and ok_red_int
     superior = minimo and ok_delta and ok_red_sup
-    if aplicar_regra_phft_95 and minimo and real.phft >= 0.95:
+    # Regra do PHFT >= 95%: não é uma opção do usuário, é a própria norma
+    # (11.4.4) - "o nível superior de desempenho térmico pode ser obtido se
+    # o PHFTUH do modelo real for igual ou superior a 95%", desde que
+    # também sejam atendidos os critérios de Tomáx/Tomín do nível mínimo.
+    # Por isso é sempre aplicada, sem checkbox.
+    if minimo and real.phft >= 0.95:
         superior = True
 
     if superior:
@@ -364,7 +377,7 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     criterios = {
         "Mínimo": [
             Criterio("PHFT UH", real.phft, lim_phft_min, ok_phft_min,
-                     f"PHFT,real {_fmt_pct(real.phft)} ≥ 0,9 × PHFT,ref = {_fmt_pct(lim_phft_min)}"),
+                     f"PHFT,real {_fmt_pct(real.phft)} > 0,9 × PHFT,ref = {_fmt_pct(lim_phft_min)}"),
             Criterio("Tomáx UH", real.tomax, lim_tomax, ok_tomax,
                      f"Tomáx,real {real.tomax:.2f} °C ≤ Tomáx,ref + {folga:.0f} = {lim_tomax:.2f} °C"),
             Criterio("Tomín UH", real.tomin, lim_tomin if avalia_tomin else None, ok_tomin,
@@ -376,13 +389,13 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
             Criterio("ΔPHFT", delta_phft, delta_phft_min, ok_delta,
                      f"ΔPHFT {_fmt_pct(delta_phft)} ≥ {_fmt_pct(delta_phft_min)}"),
             Criterio("RedCgTT", red_cgtt, red_int, ok_red_int,
-                     f"RedCgTT {_fmt_pct(red_cgtt)} > {_fmt_pct(red_int)}"),
+                     f"RedCgTT {_fmt_pct(red_cgtt)} ≥ {_fmt_pct(red_int)}"),
         ],
         "Superior": [
             Criterio("ΔPHFT", delta_phft, delta_phft_min, ok_delta,
                      f"ΔPHFT {_fmt_pct(delta_phft)} ≥ {_fmt_pct(delta_phft_min)}"),
             Criterio("RedCgTT", red_cgtt, red_sup, ok_red_sup,
-                     f"RedCgTT {_fmt_pct(red_cgtt)} > {_fmt_pct(red_sup)}"),
+                     f"RedCgTT {_fmt_pct(red_cgtt)} ≥ {_fmt_pct(red_sup)}"),
         ],
     }
 
@@ -394,7 +407,7 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     )
 
 
-st.set_page_config(page_title="NBR 15575 — Desempenho térmico", layout="wide")
+st.set_page_config(page_title="NBR 15575 - Desempenho térmico", layout="wide")
 
 AQUI = Path(__file__).parent
 
@@ -497,8 +510,10 @@ with st.sidebar:
     pavimento = st.selectbox("Pavimento", PAVIMENTOS,
                              disabled=(tipologia == "Unifamiliar"))
 
-    regra_95 = st.checkbox(
-        "Aplicar regra do PHFT ≥ 95% para nível superior", value=False,
+    st.caption(
+        "A regra da norma que classifica direto no nível Superior quando "
+        "PHFT,real ≥ 95% (e Tomáx/Tomín do nível mínimo são atendidos) é "
+        "sempre verificada - não é uma opção."
     )
 
 col_ref, col_real = st.columns(2)
@@ -525,6 +540,13 @@ if not zonas_comuns:
 
 st.subheader("Ambientes de permanência prolongada")
 st.caption("Marque apenas os APP. Banheiros, circulações e cozinhas ficam de fora.")
+st.caption(
+    "Use **misto** para o APP que funciona como sala e dormitório no mesmo "
+    "espaço (quitinetes, lofts, studios): a norma exige um padrão de "
+    "ocupação próprio para ele (dormindo/descansando 00h-08h e 22h-24h, "
+    "sentado/TV 14h-22h), diferente de marcá-lo apenas como sala ou só "
+    "como dormitório."
+)
 
 config = pd.DataFrame({
     "Zona": zonas_comuns,
@@ -536,7 +558,7 @@ editado = st.data_editor(
     config, hide_index=True, use_container_width=True,
     column_config={
         "Zona": st.column_config.TextColumn(disabled=True),
-        "Tipo": st.column_config.SelectboxColumn(options=["sala", "dormitorio"]),
+        "Tipo": st.column_config.SelectboxColumn(options=["sala", "dormitorio", "misto"]),
         "Área útil [m²]": st.column_config.NumberColumn(min_value=0.0, step=0.5),
     },
 )
@@ -559,7 +581,7 @@ if sum(a.area for a in apps) <= 0:
 
 res_ref = resultados_modelo(to_ref, cargas_ref, apps, intervalo)
 res_real = resultados_modelo(to_real, cargas_real, apps, intervalo)
-cls = classificar(res_ref, res_real, tipologia, pavimento, zb, regra_95)
+cls = classificar(res_ref, res_real, tipologia, pavimento, zb)
 
 st.divider()
 c1, c2 = st.columns(2)
