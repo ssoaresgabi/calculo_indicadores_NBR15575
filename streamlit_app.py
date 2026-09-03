@@ -509,11 +509,6 @@ with st.sidebar:
     tipologia = st.radio("Tipologia", ["Unifamiliar", "Multifamiliar"])
     pavimento = st.selectbox("Pavimento", PAVIMENTOS,
                              disabled=(tipologia == "Unifamiliar"))
-
-    st.caption(
-        "A regra da norma que classifica direto no nível Superior quando "
-        "PHFT,real ≥ 95% (e Tomáx/Tomín do nível mínimo são atendidos) é "
-        "sempre verificada - não é uma opção."
     )
 
 col_ref, col_real = st.columns(2)
