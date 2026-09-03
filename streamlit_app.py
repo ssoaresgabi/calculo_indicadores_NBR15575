@@ -58,6 +58,64 @@ INTERVALOS = {
     3: Intervalo(3, "TBSm ≥ 27 °C", None, 28.0, 30.0, None, False),
 }
 
+# ---------------------------------------------------------------------------
+# Zoneamento bioclimático (ABNT NBR 15220-3:2024 - 2ª edição, 03.12.2024,
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ZonaBioclimatica:
+    codigo: str
+    descricao: str
+    intervalo: int
+    avalia_tomin: bool
+
+
+ZONAS_BIOCLIMATICAS = {
+    "1R": ZonaBioclimatica("1R", "Muito fria com inverno rigoroso", 1, True),
+    "1M": ZonaBioclimatica("1M", "Muito fria com inverno moderado", 1, True),
+    "2R": ZonaBioclimatica("2R", "Fria com inverno rigoroso", 1, True),
+    "2M": ZonaBioclimatica("2M", "Fria com inverno moderado", 1, True),
+    "3A": ZonaBioclimatica("3A", "Mista e úmida", 1, True),
+    "3B": ZonaBioclimatica("3B", "Mista e seca", 1, False),
+    "4A": ZonaBioclimatica("4A", "Levemente quente e úmida", 1, True),
+    "4B": ZonaBioclimatica("4B", "Levemente quente e seca", 1, True),
+    "5A": ZonaBioclimatica("5A", "Quente e úmida", 2, False),
+    "5B": ZonaBioclimatica("5B", "Quente e seca", 2, False),
+    "6A": ZonaBioclimatica("6A", "Muito quente e úmida", 3, False),
+    "6B": ZonaBioclimatica("6B", "Muito quente e seca", 3, False),
+}
+
+
+def classificar_zona_bioclimatica(
+    tbsm: float, ur: float,
+    latitude: float | None = None, longitude: float | None = None,
+) -> str:
+    """
+    Classifica a zona bioclimática (NBR 15220-3:2024, 5.2) a partir da TBSm
+    (temperatura média anual de bulbo seco externa, °C) e da UR (umidade
+    relativa média anual externa, %). Latitude/longitude só decidem 1R×1M e
+    2R×2M - fora dessas duas faixas de TBSm são ignoradas.
+    """
+    if tbsm < 18.8:
+        if latitude is not None:
+            if -30.0 <= latitude <= -27.2 and tbsm < 17.0:
+                return "1R"
+            if latitude < -30.0 and tbsm < 18.5:
+                return "1R"
+        return "1M"
+    if tbsm < 20.9:
+        if latitude is not None and longitude is not None \
+                and latitude < -24.2 and longitude < -50.3:
+            return "2R"
+        return "2M"
+    if tbsm < 22.9:
+        return "3A" if ur > 73.2 else "3B"
+    if tbsm < 25.0:
+        return "4A" if ur > 70.3 else "4B"
+    if tbsm < 27.0:
+        return "5A" if ur > 68.7 else "5B"
+    return "6A" if ur > 66.8 else "6B"
+
 
 # ---------------------------------------------------------------------------
 # Limiares dos níveis de desempenho
@@ -309,7 +367,7 @@ def _fmt_pct(v):
 
 
 def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: str,
-                zona_bioclimatica: int) -> Classificacao:
+                zona_bioclimatica: str) -> Classificacao:
     chave = chave_tipologia(tipologia, pavimento)
 
     # ---- nível mínimo -----------------------------------------------------
@@ -324,7 +382,10 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     lim_tomax = ref.tomax + folga
     ok_tomax = real.tomax <= lim_tomax
 
-    avalia_tomin = zona_bioclimatica < 5
+    # zona_bioclimatica: código novo (1R,1M,2R,2M,3A,3B,4A,4B,5A,5B,6A,6B) da
+    # NBR 15220-3:2024. Ver nota em ZONAS_BIOCLIMATICAS sobre a fonte de
+    # avalia_tomin.
+    avalia_tomin = ZONAS_BIOCLIMATICAS[zona_bioclimatica].avalia_tomin
     lim_tomin = ref.tomin - 1.0
     ok_tomin = (real.tomin >= lim_tomin) if avalia_tomin else None
 
@@ -357,11 +418,6 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
 
     intermediario = minimo and ok_delta and ok_red_int
     superior = minimo and ok_delta and ok_red_sup
-    # Regra do PHFT >= 95%: não é uma opção do usuário, é a própria norma
-    # (11.4.4) - "o nível superior de desempenho térmico pode ser obtido se
-    # o PHFTUH do modelo real for igual ou superior a 95%", desde que
-    # também sejam atendidos os critérios de Tomáx/Tomín do nível mínimo.
-    # Por isso é sempre aplicada, sem checkbox.
     if minimo and real.phft >= 0.95:
         superior = True
 
@@ -407,7 +463,7 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     )
 
 
-st.set_page_config(page_title="NBR 15575 - Desempenho térmico", layout="wide")
+st.set_page_config(page_title="NBR 15575 — Desempenho térmico", layout="wide")
 
 AQUI = Path(__file__).parent
 
@@ -490,21 +546,39 @@ with st.sidebar:
     opcoes = ["Escolher cidade", "Informar manualmente"] if climas is not None \
         else ["Informar manualmente"]
     if climas is None:
-        st.caption("climas.csv não encontrado - informe a zona e o intervalo manualmente.")
+        st.caption("climas.csv não encontrado - informe TBSm e UR manualmente.")
     modo = st.radio("Definição do clima", opcoes)
     if modo == "Escolher cidade":
         cidade = st.selectbox("Cidade", climas["cidade"].tolist(),
                               index=int(climas.index[climas["cidade"] == "Florianopolis/SC"][0])
                               if "Florianopolis/SC" in climas["cidade"].values else 0)
         linha = climas[climas["cidade"] == cidade].iloc[0]
-        zb, num_intervalo = int(linha["zona_bioclimatica"]), int(linha["intervalo"])
+        zb = str(linha["zona_bioclimatica"])
     else:
-        zb = st.number_input("Zona bioclimática", 1, 8, 3)
-        num_intervalo = st.selectbox("Intervalo (TBSm)", [1, 2, 3],
-                                     format_func=lambda i: INTERVALOS[i].descricao)
+        st.caption(
+            "Sua cidade não está entre as 29 da tabela? Informe a TBSm e a "
+            "UR médias anuais externas (do mesmo arquivo climático usado na "
+            "simulação) que a zona é calculada pela regra da NBR 15220-3:2024."
+        )
+        tbsm = st.number_input("TBSm - temperatura média anual de bulbo seco externa [°C]",
+                               value=22.0, step=0.1, format="%.2f")
+        ur = st.number_input("UR - umidade relativa média anual externa [%]",
+                             value=70.0, step=0.1, format="%.1f")
+        with st.expander("Latitude/longitude (só é necessário perto do limite das zonas 1R/1M e 2R/2M)"):
+            usar_coords = st.checkbox("Informar latitude/longitude", value=False)
+            lat = st.number_input("Latitude [°] (negativa no hemisfério sul)", value=0.0, step=0.1) \
+                if usar_coords else None
+            lon = st.number_input("Longitude [°] (negativa a oeste de Greenwich)", value=0.0, step=0.1) \
+                if usar_coords else None
+        zb = classificar_zona_bioclimatica(tbsm, ur, lat, lon)
 
+    info_zona = ZONAS_BIOCLIMATICAS[zb]
+    num_intervalo = info_zona.intervalo
     intervalo = INTERVALOS[num_intervalo]
-    st.info(f"ZB {zb} · Intervalo {intervalo.numero} - {intervalo.descricao}")
+    st.info(
+        f"Zona bioclimática {zb} — {info_zona.descricao}\n\n"
+        f"Intervalo {intervalo.numero} - {intervalo.descricao}"
+    )
 
     tipologia = st.radio("Tipologia", ["Unifamiliar", "Multifamiliar"])
     pavimento = st.selectbox("Pavimento", PAVIMENTOS,
@@ -535,11 +609,7 @@ if not zonas_comuns:
 st.subheader("Ambientes de permanência prolongada")
 st.caption("Marque apenas os APP. Banheiros, circulações e cozinhas ficam de fora.")
 st.caption(
-    "Use **misto** para o APP que funciona como sala e dormitório no mesmo "
-    "espaço (quitinetes, lofts, studios): a norma exige um padrão de "
-    "ocupação próprio para ele (dormindo/descansando 00h-08h e 22h-24h, "
-    "sentado/TV 14h-22h), diferente de marcá-lo apenas como sala ou só "
-    "como dormitório."
+    
 )
 
 config = pd.DataFrame({
