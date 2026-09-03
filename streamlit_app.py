@@ -19,19 +19,7 @@ JOULE_POR_KWH = 3_600_000
 # ---------------------------------------------------------------------------
 # Ocupação
 # ---------------------------------------------------------------------------
-# Índice 0 = hora encerrada às 01:00.
-#
-# Padrões de ocupação conforme a NBR 15575-1 (método de simulação). O padrão
-# "misto" é o exigido pela norma para o APP que acumula as duas funções no
-# mesmo espaço ("Quando um APP for utilizado como sala e como dormitório -
-# por exemplo, quitinetes, lofts e similares - este deve ser modelado
-# considerando o uso misto"): dormindo/descansando 00h-08h e 22h-24h,
-# sentado/TV 14h-22h, e 0% de ocupação no restante (08h-14h). É exatamente a
-# união dos padrões de sala e dormitório - não a soma das duas ocupações
-# separadas, e não deve ficar de fora da ferramenta como uma terceira opção
-# esquecida: sem ela, todo APP conjugado (quitinete, loft, studio) acaba
-# forçosamente classificado como "sala" ou "dormitório" avulso, com padrão de
-# ocupação e PHFT errados.
+
 OCUPACAO = {
     # Sala/estar: 14h às 22h  → 2.920 h/ano
     "sala": [0] * 14 + [1] * 8 + [0] * 2,
@@ -73,24 +61,9 @@ INTERVALOS = {
 
 
 # ---------------------------------------------------------------------------
-# Zoneamento bioclimático (ABNT NBR 15220-3:2024 - 2ª edição, 03.12.2024,
-# em vigor desde jun/2025 - substitui as 8 zonas da NBR 15220-3:2005)
+# Zoneamento bioclimático
 # ---------------------------------------------------------------------------
-# 12 zonas (seção 5.2 da norma): as 6 zonas 1-6 mais frias/quentes,
-# subdivididas em duas por umidade (ou por rigor do inverno, nas zonas 1 e
-# 2). Cada zona já define o intervalo de TBSm da NBR 15575-1 a usar.
-#
-# avalia_tomin: quais zonas avaliam a TomínUH. NÃO está na NBR 15220-3 (que
-# só define as zonas em si) - vem do projeto de emenda da Seção 11 da NBR
-# 15575-1 (labeee.ufsc.br/sites/default/files/projetos/normalizacao/
-# Emenda_NBR15575-1_Secao11.pdf), que na data em que foi consultado ainda
-# trazia "NÃO TEM VALOR NORMATIVO" no rodapé - ou seja, é a melhor fonte
-# disponível, mas não uma cópia final e assinada da emenda publicada.
-# Texto: "a avaliação da TomínUH deve ser realizada apenas para as
-# edificações localizadas nas zonas bioclimáticas 1 (R ou M), 2 (R ou M) ou
-# 3A ou 4" - repare que é só a 3A (não a 3B) e as duas subzonas da 4 (4A e
-# 4B). Vale conferir contra o texto definitivo se/quando ele estiver
-# disponível.
+
 @dataclass(frozen=True)
 class ZonaBioclimatica:
     codigo: str
@@ -399,11 +372,6 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
                 zona_bioclimatica: str) -> Classificacao:
     chave = chave_tipologia(tipologia, pavimento)
 
-    # ---- nível mínimo -----------------------------------------------------
-    # Tabela 4 da NBR 15575-1: "PHFTUH,real > 0,9.PHFTUH,ref" - comparação
-    # estrita. A planilha oficial usa ">=" na aba do intervalo 1 e ">" nas
-    # abas dos intervalos 2 e 3 (inconsistência interna dela); o texto da
-    # norma vale para os três intervalos, então usamos ">" sempre.
     lim_phft_min = 0.9 * ref.phft
     ok_phft_min = real.phft > lim_phft_min
 
@@ -497,7 +465,7 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
     )
 
 
-st.set_page_config(page_title="NBR 15575 — Desempenho térmico", layout="wide")
+st.set_page_config(page_title="NBR 15575 - Desempenho térmico", layout="wide")
 
 AQUI = Path(__file__).parent
 
