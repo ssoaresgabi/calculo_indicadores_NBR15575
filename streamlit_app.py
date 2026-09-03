@@ -604,18 +604,17 @@ DICA_APP = (
     "lofts, studios)."
 )
 
+OPCOES_TIPO = {"Sala": "sala", "Dormitório": "dormitorio", "Misto": "misto"}
+
 with st.container(key="tabela_apps"):
     st.markdown(
         """
         <style>
-        .st-key-tabela_apps [data-testid="stHorizontalBlock"] {
-            gap: 0.5rem;
+        .st-key-tabela_apps > div[data-testid="stVerticalBlock"] {
+            gap: 1rem;
         }
-        .st-key-tabela_apps [data-testid="stHorizontalBlock"]:not(:first-of-type) {
-            margin-bottom: -0.9rem;
-        }
-        .st-key-tabela_apps [data-testid="stHorizontalBlock"]:first-of-type {
-            margin-bottom: 1.2rem;
+        .st-key-tabela_apps_corpo > div[data-testid="stVerticalBlock"] {
+            gap: 0.1rem;
         }
         .st-key-tabela_apps .cabecalho-apps {
             font-weight: 700;
@@ -635,19 +634,21 @@ with st.container(key="tabela_apps"):
     col_area.markdown('<div class="cabecalho-apps">Área útil (m²)</div>', unsafe_allow_html=True)
 
     apps = []
-    for zona in zonas_comuns:
-        col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2], gap="small")
-        col_zona.write(zona)
-        e_app = col_app.checkbox("APP", value=True, key=f"eapp_{zona}",
-                                 label_visibility="collapsed")
-        tipo = col_tipo.selectbox("Tipo", ["sala", "dormitorio", "misto"], index=1,
-                                  key=f"tipo_{zona}", disabled=not e_app,
-                                  label_visibility="collapsed")
-        area = col_area.number_input("Área útil (m²)", min_value=0.0, step=0.5,
-                                     key=f"area_{zona}", disabled=not e_app,
+    with st.container(key="tabela_apps_corpo"):
+        for zona in zonas_comuns:
+            col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2], gap="small")
+            col_zona.write(zona)
+            e_app = col_app.checkbox("APP", value=True, key=f"eapp_{zona}",
                                      label_visibility="collapsed")
-        if e_app:
-            apps.append(APP(nome=zona, zona=zona, tipo=tipo, area=float(area)))
+            tipo_label = col_tipo.selectbox("Tipo", list(OPCOES_TIPO.keys()), index=1,
+                                            key=f"tipo_{zona}", disabled=not e_app,
+                                            label_visibility="collapsed")
+            area = col_area.number_input("Área útil (m²)", min_value=0.0, step=0.5,
+                                         key=f"area_{zona}", disabled=not e_app,
+                                         label_visibility="collapsed")
+            if e_app:
+                apps.append(APP(nome=zona, zona=zona, tipo=OPCOES_TIPO[tipo_label],
+                                area=float(area)))
 
 if not apps:
     st.warning("Selecione ao menos um APP.")
