@@ -19,6 +19,19 @@ JOULE_POR_KWH = 3_600_000
 # ---------------------------------------------------------------------------
 # Ocupação
 # ---------------------------------------------------------------------------
+# Índice 0 = hora encerrada às 01:00.
+#
+# Padrões de ocupação conforme a NBR 15575-1 (método de simulação). O padrão
+# "misto" é o exigido pela norma para o APP que acumula as duas funções no
+# mesmo espaço ("Quando um APP for utilizado como sala e como dormitório -
+# por exemplo, quitinetes, lofts e similares - este deve ser modelado
+# considerando o uso misto"): dormindo/descansando 00h-08h e 22h-24h,
+# sentado/TV 14h-22h, e 0% de ocupação no restante (08h-14h). É exatamente a
+# união dos padrões de sala e dormitório - não a soma das duas ocupações
+# separadas, e não deve ficar de fora da ferramenta como uma terceira opção
+# esquecida: sem ela, todo APP conjugado (quitinete, loft, studio) acaba
+# forçosamente classificado como "sala" ou "dormitório" avulso, com padrão de
+# ocupação e PHFT errados.
 OCUPACAO = {
     # Sala/estar: 14h às 22h  → 2.920 h/ano
     "sala": [0] * 14 + [1] * 8 + [0] * 2,
@@ -58,10 +71,26 @@ INTERVALOS = {
     3: Intervalo(3, "TBSm ≥ 27 °C", None, 28.0, 30.0, None, False),
 }
 
+
 # ---------------------------------------------------------------------------
 # Zoneamento bioclimático (ABNT NBR 15220-3:2024 - 2ª edição, 03.12.2024,
+# em vigor desde jun/2025 - substitui as 8 zonas da NBR 15220-3:2005)
 # ---------------------------------------------------------------------------
-
+# 12 zonas (seção 5.2 da norma): as 6 zonas 1-6 mais frias/quentes,
+# subdivididas em duas por umidade (ou por rigor do inverno, nas zonas 1 e
+# 2). Cada zona já define o intervalo de TBSm da NBR 15575-1 a usar.
+#
+# avalia_tomin: quais zonas avaliam a TomínUH. NÃO está na NBR 15220-3 (que
+# só define as zonas em si) - vem do projeto de emenda da Seção 11 da NBR
+# 15575-1 (labeee.ufsc.br/sites/default/files/projetos/normalizacao/
+# Emenda_NBR15575-1_Secao11.pdf), que na data em que foi consultado ainda
+# trazia "NÃO TEM VALOR NORMATIVO" no rodapé - ou seja, é a melhor fonte
+# disponível, mas não uma cópia final e assinada da emenda publicada.
+# Texto: "a avaliação da TomínUH deve ser realizada apenas para as
+# edificações localizadas nas zonas bioclimáticas 1 (R ou M), 2 (R ou M) ou
+# 3A ou 4" - repare que é só a 3A (não a 3B) e as duas subzonas da 4 (4A e
+# 4B). Vale conferir contra o texto definitivo se/quando ele estiver
+# disponível.
 @dataclass(frozen=True)
 class ZonaBioclimatica:
     codigo: str
@@ -418,6 +447,11 @@ def classificar(ref: ResultadoUH, real: ResultadoUH, tipologia: str, pavimento: 
 
     intermediario = minimo and ok_delta and ok_red_int
     superior = minimo and ok_delta and ok_red_sup
+    # Regra do PHFT >= 95%: não é uma opção do usuário, é a própria norma
+    # (11.4.4) - "o nível superior de desempenho térmico pode ser obtido se
+    # o PHFTUH do modelo real for igual ou superior a 95%", desde que
+    # também sejam atendidos os critérios de Tomáx/Tomín do nível mínimo.
+    # Por isso é sempre aplicada, sem checkbox.
     if minimo and real.phft >= 0.95:
         superior = True
 
@@ -549,6 +583,10 @@ with st.sidebar:
         st.caption("climas.csv não encontrado - informe TBSm e UR manualmente.")
     modo = st.radio("Definição do clima", opcoes)
     if modo == "Escolher cidade":
+        # climas.csv traz as 29 cidades da NBR 15220-3:2024 (27 capitais +
+        # Canela/RS e Petrolina/PE, as duas representativas que não são
+        # capital) - não é a lista completa dos 5 507 municípios (essa está
+        # na ABNT TR 15220-3-1, não normativa e não incluída aqui).
         cidade = st.selectbox("Cidade", climas["cidade"].tolist(),
                               index=int(climas.index[climas["cidade"] == "Florianopolis/SC"][0])
                               if "Florianopolis/SC" in climas["cidade"].values else 0)
@@ -609,7 +647,11 @@ if not zonas_comuns:
 st.subheader("Ambientes de permanência prolongada")
 st.caption("Marque apenas os APP. Banheiros, circulações e cozinhas ficam de fora.")
 st.caption(
-    
+    "Use **misto** para o APP que funciona como sala e dormitório no mesmo "
+    "espaço (quitinetes, lofts, studios): a norma exige um padrão de "
+    "ocupação próprio para ele (dormindo/descansando 00h-08h e 22h-24h, "
+    "sentado/TV 14h-22h), diferente de marcá-lo apenas como sala ou só "
+    "como dormitório."
 )
 
 config = pd.DataFrame({
