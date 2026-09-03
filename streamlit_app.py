@@ -1,9 +1,4 @@
 """
-Avaliação de desempenho térmico pelo método de simulação da ABNT NBR 15575-1.
-
-Versão de arquivo único: não depende de nenhum outro .py.
-O climas.csv é opcional — sem ele, informe zona bioclimática e intervalo manualmente.
-
 Execução:  streamlit run streamlit_app.py
 """
 
@@ -22,7 +17,7 @@ HORAS_ANO = 8760
 JOULE_POR_KWH = 3_600_000
 
 # ---------------------------------------------------------------------------
-# Ocupação — padrões da planilha oficial (idênticos em todos os dias do ano)
+# Ocupação
 # ---------------------------------------------------------------------------
 # Índice 0 = hora encerrada às 01:00.
 OCUPACAO = {
@@ -41,7 +36,7 @@ def perfil_ocupacao(tipo: str, n_horas: int = HORAS_ANO) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-# Faixas de temperatura operativa por intervalo (Tabela da NBR 15575-1)
+# Faixas de temperatura operativa por intervalo
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Intervalo:
@@ -420,11 +415,11 @@ def bloco_upload(rotulo: str, chave: str):
     """Par de uploads (VN + AC) para um modelo."""
     st.markdown(f"**{rotulo}**")
     vn = st.file_uploader(
-        f"Ventilação natural — Zone Operative Temperature ({rotulo})",
+        f"Ventilação natural - Zone Operative Temperature ({rotulo})",
         type=["csv", "xlsx", "xlsm"], key=f"vn_{chave}",
     )
     ac = st.file_uploader(
-        f"Ar-condicionado — Zone Ideal Loads Total Heating/Cooling Energy ({rotulo})",
+        f"Ar-condicionado - Zone Ideal Loads Total Heating/Cooling Energy ({rotulo})",
         type=["csv", "xlsx", "xlsm"], key=f"ac_{chave}",
     )
     return vn, ac
@@ -471,8 +466,8 @@ def tabela_uh(res, titulo):
 
 
 # ---------------------------------------------------------------------------
-st.title("Desempenho térmico — NBR 15575-1")
-st.caption("Método de simulação computacional · Anexo A da ABNT NBR 15575-1")
+st.title("Classificação do desempenho térmico - NBR 15575-1")
+st.caption("Método de simulação computacional")
 
 climas = carregar_climas()
 
@@ -482,7 +477,7 @@ with st.sidebar:
     opcoes = ["Escolher cidade", "Informar manualmente"] if climas is not None \
         else ["Informar manualmente"]
     if climas is None:
-        st.caption("climas.csv não encontrado — informe a zona e o intervalo manualmente.")
+        st.caption("climas.csv não encontrado - informe a zona e o intervalo manualmente.")
     modo = st.radio("Definição do clima", opcoes)
     if modo == "Escolher cidade":
         cidade = st.selectbox("Cidade", climas["cidade"].tolist(),
@@ -496,7 +491,7 @@ with st.sidebar:
                                      format_func=lambda i: INTERVALOS[i].descricao)
 
     intervalo = INTERVALOS[num_intervalo]
-    st.info(f"ZB {zb} · Intervalo {intervalo.numero} — {intervalo.descricao}")
+    st.info(f"ZB {zb} · Intervalo {intervalo.numero} - {intervalo.descricao}")
 
     tipologia = st.radio("Tipologia", ["Unifamiliar", "Multifamiliar"])
     pavimento = st.selectbox("Pavimento", PAVIMENTOS,
@@ -504,8 +499,6 @@ with st.sidebar:
 
     regra_95 = st.checkbox(
         "Aplicar regra do PHFT ≥ 95% para nível superior", value=False,
-        help="A planilha oficial só alcança esse ramo em casos-limite. "
-             "Marque para aplicá-lo como alternativa explícita.",
     )
 
 col_ref, col_real = st.columns(2)
