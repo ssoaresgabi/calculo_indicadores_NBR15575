@@ -602,25 +602,26 @@ st.caption(
     "espaço (quitinetes, lofts, studios)."
 )
 
-config = pd.DataFrame({
-    "Zona": zonas_comuns,
-    "É APP": [True] * len(zonas_comuns),
-    "Tipo": ["dormitorio"] * len(zonas_comuns),
-    "Área útil [m²]": [0.0] * len(zonas_comuns),
-})
-editado = st.data_editor(
-    config, hide_index=True, use_container_width=True,
-    column_config={
-        "Zona": st.column_config.TextColumn(disabled=True),
-        "Tipo": st.column_config.SelectboxColumn(options=["sala", "dormitorio", "misto"]),
-        "Área útil [m²]": st.column_config.NumberColumn(min_value=0.0, step=0.5),
-    },
-)
+col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2])
+col_zona.markdown("**Zona**")
+col_app.markdown("**É APP**")
+col_tipo.markdown("**Tipo**")
+col_area.markdown("**Área útil [m²]**")
 
-apps = [
-    APP(nome=r["Zona"], zona=r["Zona"], tipo=r["Tipo"], area=float(r["Área útil [m²]"]))
-    for _, r in editado.iterrows() if r["É APP"]
-]
+apps = []
+for zona in zonas_comuns:
+    col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2])
+    col_zona.write(zona)
+    e_app = col_app.checkbox("É APP", value=True, key=f"eapp_{zona}",
+                             label_visibility="collapsed")
+    tipo = col_tipo.selectbox("Tipo", ["sala", "dormitorio", "misto"], index=1,
+                              key=f"tipo_{zona}", disabled=not e_app,
+                              label_visibility="collapsed")
+    area = col_area.number_input("Área útil [m²]", min_value=0.0, step=0.5,
+                                 key=f"area_{zona}", disabled=not e_app,
+                                 label_visibility="collapsed")
+    if e_app:
+        apps.append(APP(nome=zona, zona=zona, tipo=tipo, area=float(area)))
 
 if not apps:
     st.warning("Selecione ao menos um APP.")
