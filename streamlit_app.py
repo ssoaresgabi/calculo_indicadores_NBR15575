@@ -610,13 +610,15 @@ with st.container(key="tabela_apps"):
         <style>
         .st-key-tabela_apps [data-testid="stHorizontalBlock"] {
             gap: 0.5rem;
+        }
+        .st-key-tabela_apps [data-testid="stHorizontalBlock"]:not(:first-of-type) {
             margin-bottom: -0.9rem;
+        }
+        .st-key-tabela_apps [data-testid="stHorizontalBlock"]:first-of-type {
+            margin-bottom: 1.2rem;
         }
         .st-key-tabela_apps .cabecalho-apps {
             font-weight: 700;
-            padding-bottom: 6px;
-            border-bottom: 2px solid rgba(128, 128, 128, 0.6);
-            margin-bottom: 4px;
         }
         </style>
         """,
