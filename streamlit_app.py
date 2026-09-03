@@ -673,6 +673,14 @@ st.subheader("Nível de desempenho")
 cor = {"Superior": "🟢", "Intermediário": "🔵", "Mínimo": "🟡"}.get(cls.nivel, "🔴")
 st.markdown(f"## {cor} {cls.nivel}")
 
+linhas = [
+    {"Nível": nivel, "Indicador": k.nome,
+     "Atende": "-" if k.atende is None else ("Sim" if k.atende else "Não")}
+    for nivel, criterios in cls.criterios.items()
+    for k in criterios
+]
+st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
+
 with st.expander("Resultados por APP"):
     for rotulo, res in (("Referência", res_ref), ("Real", res_real)):
         st.markdown(f"**{rotulo}**")
