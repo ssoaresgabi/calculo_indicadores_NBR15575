@@ -596,32 +596,56 @@ if not zonas_comuns:
     st.stop()
 
 st.subheader("Ambientes de permanência prolongada")
-st.caption("Marque apenas os APP. Banheiros, circulações e cozinhas ficam de fora.")
-st.caption(
-    "Use **misto** para o APP que funciona como sala e dormitório no mesmo "
-    "espaço (quitinetes, lofts, studios)."
+
+DICA_APP = (
+    "Marque apenas as APPs (salas e dormitórios). Áreas como banheiros, "
+    "circulações e cozinhas não devem ser marcadas. Use misto para a APP "
+    "que funciona como sala e dormitório no mesmo espaço (quitinetes, "
+    "lofts, studios)."
 )
 
-col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2])
-col_zona.markdown("**Zona**")
-col_app.markdown("**É APP**")
-col_tipo.markdown("**Tipo**")
-col_area.markdown("**Área útil [m²]**")
+with st.container(key="tabela_apps"):
+    st.markdown(
+        """
+        <style>
+        .st-key-tabela_apps [data-testid="stHorizontalBlock"] {
+            gap: 0.5rem;
+            margin-bottom: -0.9rem;
+        }
+        .st-key-tabela_apps .cabecalho-apps {
+            font-weight: 700;
+            padding-bottom: 6px;
+            border-bottom: 2px solid rgba(128, 128, 128, 0.6);
+            margin-bottom: 4px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-apps = []
-for zona in zonas_comuns:
-    col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2])
-    col_zona.write(zona)
-    e_app = col_app.checkbox("É APP", value=True, key=f"eapp_{zona}",
-                             label_visibility="collapsed")
-    tipo = col_tipo.selectbox("Tipo", ["sala", "dormitorio", "misto"], index=1,
-                              key=f"tipo_{zona}", disabled=not e_app,
-                              label_visibility="collapsed")
-    area = col_area.number_input("Área útil [m²]", min_value=0.0, step=0.5,
-                                 key=f"area_{zona}", disabled=not e_app,
+    col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2], gap="small")
+    col_zona.markdown('<div class="cabecalho-apps">Zona</div>', unsafe_allow_html=True)
+    col_app.markdown(
+        f'<div class="cabecalho-apps" title="{DICA_APP}">APP&nbsp;ℹ️</div>',
+        unsafe_allow_html=True,
+    )
+    col_tipo.markdown('<div class="cabecalho-apps">Tipo</div>', unsafe_allow_html=True)
+    col_area.markdown('<div class="cabecalho-apps">Área útil (m²)</div>', unsafe_allow_html=True)
+
+    apps = []
+    for zona in zonas_comuns:
+        col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2], gap="small")
+        col_zona.write(zona)
+        e_app = col_app.checkbox("APP", value=True, key=f"eapp_{zona}",
                                  label_visibility="collapsed")
-    if e_app:
-        apps.append(APP(nome=zona, zona=zona, tipo=tipo, area=float(area)))
+        tipo = col_tipo.selectbox("Tipo", ["sala", "dormitorio", "misto"], index=1,
+                                  key=f"tipo_{zona}", disabled=not e_app,
+                                  label_visibility="collapsed")
+        area = col_area.number_input("Área útil (m²)", min_value=0.0, step=0.5,
+                                     key=f"area_{zona}", disabled=not e_app,
+                                     label_visibility="collapsed")
+        if e_app:
+            apps.append(APP(nome=zona, zona=zona, tipo=tipo, area=float(area)))
 
 if not apps:
     st.warning("Selecione ao menos um APP.")
