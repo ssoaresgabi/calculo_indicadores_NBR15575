@@ -504,14 +504,43 @@ AQUI = Path(__file__).parent
 
 @st.cache_data
 def carregar_climas() -> pd.DataFrame | None:
-    """climas.csv é opcional: sem ele, o clima é informado manualmente."""
+    """climas.csv é opcional: sem ele, o clima é informado manualmente.
+
+    Valida se as zonas do arquivo são do esquema novo (NBR 15220-3:2024,
+    1R a 6B) - um climas.csv antigo (zonas numéricas 1 a 8, de antes da
+    atualização da ferramenta) não é compatível com ZONAS_BIOCLIMATICAS e
+    quebraria a classificação mais adiante, então essas linhas são
+    descartadas aqui, com aviso, em vez de deixar o erro estourar depois.
+    """
     caminho = AQUI / "climas.csv"
     if not caminho.exists():
         return None
     try:
-        return pd.read_csv(caminho)
+        df = pd.read_csv(caminho)
     except Exception:
         return None
+
+    if "cidade" not in df.columns or "zona_bioclimatica" not in df.columns:
+        st.sidebar.warning(
+            "climas.csv não tem as colunas esperadas (cidade, "
+            "zona_bioclimatica, ...) - ignorando o arquivo. Confira se é a "
+            "versão nova, enviada junto com este streamlit_app.py."
+        )
+        return None
+
+    zonas_validas = df["zona_bioclimatica"].astype(str).isin(ZONAS_BIOCLIMATICAS)
+    if not zonas_validas.all():
+        n_invalidas = int((~zonas_validas).sum())
+        st.sidebar.warning(
+            f"climas.csv tem {n_invalidas} cidade(s) com zona bioclimática "
+            "fora do padrão NBR 15220-3:2024 (1R, 1M, 2R, 2M, 3A, 3B, 4A, "
+            "4B, 5A, 5B, 6A, 6B) - essas linhas foram ignoradas. Isso "
+            "costuma acontecer quando o climas.csv é de uma versão antiga "
+            "da ferramenta; use o que veio junto com este streamlit_app.py."
+        )
+        df = df[zonas_validas].reset_index(drop=True)
+
+    return df if not df.empty else None
 
 
 def bloco_upload(rotulo: str, chave: str):
@@ -610,7 +639,14 @@ with st.sidebar:
                 if usar_coords else None
         zb = classificar_zona_bioclimatica(tbsm, ur, lat, lon)
 
-    info_zona = ZONAS_BIOCLIMATICAS[zb]
+    info_zona = ZONAS_BIOCLIMATICAS.get(zb)
+    if info_zona is None:
+        st.error(
+            f"Zona bioclimática '{zb}' não reconhecida (esperado: 1R, 1M, "
+            "2R, 2M, 3A, 3B, 4A, 4B, 5A, 5B, 6A ou 6B). Se veio do "
+            "climas.csv, confira se o arquivo é a versão nova da ferramenta."
+        )
+        st.stop()
     num_intervalo = info_zona.intervalo
     intervalo = INTERVALOS[num_intervalo]
     st.info(
