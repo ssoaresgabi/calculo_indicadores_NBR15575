@@ -241,7 +241,6 @@ class APP:
     nome: str
     zona: str
     tipo: Literal["sala", "dormitorio", "misto"]
-    area: float
 
 
 @dataclass
@@ -301,7 +300,7 @@ def calcular_app(app: APP, to: pd.Series, cgtr: pd.Series | None,
     )
 
 
-def consolidar_uh(resultados: list[ResultadoAPP], areas: list[float]) -> ResultadoUH:
+def consolidar_uh(resultados: list[ResultadoAPP], area_total: float) -> ResultadoUH:
     """PHFT = média aritmética; cargas = soma; Tomáx = máximo; Tomín = mínimo."""
     if not resultados:
         raise ValueError("Nenhum APP informado.")
@@ -312,7 +311,7 @@ def consolidar_uh(resultados: list[ResultadoAPP], areas: list[float]) -> Resulta
         cgtt=sum(r.cgtr + r.cgta for r in resultados),
         tomax=max(r.tomax for r in resultados),
         tomin=min(r.tomin for r in resultados),
-        area=sum(areas),
+        area=area_total,
         apps=resultados,
     )
 
@@ -491,15 +490,14 @@ def carregar_modelo(vn_file, ac_file, rotulo: str):
     return to, cargas, zonas_to
 
 
-def resultados_modelo(to, cargas, apps, intervalo):
-    saidas, areas = [], []
+def resultados_modelo(to, cargas, apps, intervalo, area_total):
+    saidas = []
     for app in apps:
         serie_to = to[(app.zona, "To")]
         serie_r = cargas[(app.zona, "CgTR")] if (app.zona, "CgTR") in cargas.columns else None
         serie_a = cargas[(app.zona, "CgTA")] if (app.zona, "CgTA") in cargas.columns else None
         saidas.append(calcular_app(app, serie_to, serie_r, serie_a, intervalo))
-        areas.append(app.area)
-    return consolidar_uh(saidas, areas)
+    return consolidar_uh(saidas, area_total)
 
 
 def tabela_uh(res, titulo):
@@ -595,6 +593,32 @@ if not zonas_comuns:
     st.error("Os modelos de referência e real não têm zonas com o mesmo nome.")
     st.stop()
 
+zona_para_uh = {zona: "UH" for zona in zonas_comuns}
+
+if tipologia == "Multifamiliar":
+    st.subheader("Unidades habitacionais")
+    st.caption(
+        "O arquivo traz zonas de várias UHs. Informe o separador que vem "
+        "antes do nome do ambiente (ex.: em 'UH01_SALA', o separador é "
+        "\"_\") para agrupar as zonas por UH automaticamente - e corrija "
+        "manualmente se alguma não ficar certa."
+    )
+    separador = st.text_input("Separador entre a UH e o nome do ambiente", value="_")
+
+    def _uh_da_zona(zona: str) -> str:
+        if separador and separador in zona:
+            return zona.split(separador)[0]
+        return zona
+
+    tabela_uhs = st.data_editor(
+        pd.DataFrame({"Zona": zonas_comuns, "UH": [_uh_da_zona(z) for z in zonas_comuns]}),
+        hide_index=True, use_container_width=True,
+        column_config={"Zona": st.column_config.TextColumn(disabled=True)},
+    )
+    zona_para_uh = dict(zip(tabela_uhs["Zona"], tabela_uhs["UH"]))
+
+uhs = sorted(set(zona_para_uh.values()))
+
 st.subheader("Ambientes de permanência prolongada")
 
 DICA_APP = (
@@ -624,72 +648,107 @@ with st.container(key="tabela_apps"):
         unsafe_allow_html=True,
     )
 
-    col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2], gap="small")
+    col_zona, col_app, col_tipo = st.columns([2, 1, 2], gap="small")
     col_zona.markdown('<div class="cabecalho-apps">Zona</div>', unsafe_allow_html=True)
     col_app.markdown(
         f'<div class="cabecalho-apps" title="{DICA_APP}">APP&nbsp;ℹ️</div>',
         unsafe_allow_html=True,
     )
     col_tipo.markdown('<div class="cabecalho-apps">Tipo</div>', unsafe_allow_html=True)
-    col_area.markdown('<div class="cabecalho-apps">Área útil (m²)</div>', unsafe_allow_html=True)
 
     apps = []
     with st.container(key="tabela_apps_corpo"):
         for zona in zonas_comuns:
-            col_zona, col_app, col_tipo, col_area = st.columns([2, 1, 2, 2], gap="small")
+            col_zona, col_app, col_tipo = st.columns([2, 1, 2], gap="small")
             col_zona.write(zona)
             e_app = col_app.checkbox("APP", value=True, key=f"eapp_{zona}",
                                      label_visibility="collapsed")
             tipo_label = col_tipo.selectbox("Tipo", list(OPCOES_TIPO.keys()), index=1,
                                             key=f"tipo_{zona}", disabled=not e_app,
                                             label_visibility="collapsed")
-            area = col_area.number_input("Área útil (m²)", min_value=0.0, step=0.5,
-                                         key=f"area_{zona}", disabled=not e_app,
-                                         label_visibility="collapsed")
             if e_app:
-                apps.append(APP(nome=zona, zona=zona, tipo=OPCOES_TIPO[tipo_label],
-                                area=float(area)))
+                apps.append(APP(nome=zona, zona=zona, tipo=OPCOES_TIPO[tipo_label]))
 
 if not apps:
     st.warning("Selecione ao menos um APP.")
     st.stop()
 
-if sum(a.area for a in apps) <= 0:
-    st.error("Informe a área útil dos APP.")
+st.subheader("Área útil")
+areas_uh = {}
+if len(uhs) <= 1:
+    areas_uh[uhs[0]] = st.number_input("Área útil da UH (m²)", min_value=0.0, step=0.5)
+else:
+    for uh in uhs:
+        areas_uh[uh] = st.number_input(f"Área útil de {uh} (m²)", min_value=0.0, step=0.5,
+                                       key=f"area_{uh}")
+
+resultados_por_uh = {}
+for uh in uhs:
+    apps_uh = [a for a in apps if zona_para_uh[a.zona] == uh]
+    if not apps_uh:
+        continue
+    res_ref = resultados_modelo(to_ref, cargas_ref, apps_uh, intervalo, areas_uh[uh])
+    res_real = resultados_modelo(to_real, cargas_real, apps_uh, intervalo, areas_uh[uh])
+    cls = classificar(res_ref, res_real, tipologia, pavimento, zb)
+    resultados_por_uh[uh] = (res_ref, res_real, cls)
+
+if not resultados_por_uh:
+    st.warning("Nenhuma UH com APP selecionado.")
     st.stop()
 
-res_ref = resultados_modelo(to_ref, cargas_ref, apps, intervalo)
-res_real = resultados_modelo(to_real, cargas_real, apps, intervalo)
-cls = classificar(res_ref, res_real, tipologia, pavimento, zb)
+sem_area = [uh for uh in resultados_por_uh if areas_uh[uh] <= 0]
+if sem_area:
+    st.error("Informe a área útil de: " + ", ".join(sem_area))
+    st.stop()
 
-st.divider()
-c1, c2 = st.columns(2)
-with c1:
-    tabela_uh(res_ref, "RESULTADOS PARA A UH REF")
-with c2:
-    tabela_uh(res_real, "RESULTADOS PARA A UH REAL")
 
-st.subheader("Nível de desempenho")
-cor = {"Superior": "🟢", "Intermediário": "🔵", "Mínimo": "🟡"}.get(cls.nivel, "🔴")
-st.markdown(f"## {cor} {cls.nivel}")
+def exibir_resultados_uh(res_ref, res_real, cls):
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        tabela_uh(res_ref, "RESULTADOS PARA A UH REF")
+    with c2:
+        tabela_uh(res_real, "RESULTADOS PARA A UH REAL")
 
-linhas = [
-    {"Nível": nivel, "Indicador": k.nome,
-     "Atende": "-" if k.atende is None else ("Sim" if k.atende else "Não")}
-    for nivel, criterios in cls.criterios.items()
-    for k in criterios
-]
-st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
+    st.subheader("Nível de desempenho")
+    cor = {"Superior": "🟢", "Intermediário": "🔵", "Mínimo": "🟡"}.get(cls.nivel, "🔴")
+    st.markdown(f"## {cor} {cls.nivel}")
 
-with st.expander("Resultados por APP"):
-    for rotulo, res in (("Referência", res_ref), ("Real", res_real)):
-        st.markdown(f"**{rotulo}**")
-        st.dataframe(pd.DataFrame([{
-            "APP": a.nome,
-            "PHFTapp": f"{a.phft * 100:.2f}%",
-            "CgTR [kWh]": f"{a.cgtr:.2f}",
-            "CgTA [kWh]": f"{a.cgta:.2f}",
-            "Tomáx [°C]": f"{a.tomax:.2f}",
-            "Tomín [°C]": f"{a.tomin:.2f}",
-            "Horas ocupadas": a.horas_ocupadas,
-        } for a in res.apps]), hide_index=True, use_container_width=True)
+    linhas = [
+        {"Nível": nivel, "Indicador": k.nome,
+         "Atende": "-" if k.atende is None else ("Sim" if k.atende else "Não")}
+        for nivel, criterios in cls.criterios.items()
+        for k in criterios
+    ]
+    st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
+
+    with st.expander("Resultados por APP"):
+        for rotulo, res in (("Referência", res_ref), ("Real", res_real)):
+            st.markdown(f"**{rotulo}**")
+            st.dataframe(pd.DataFrame([{
+                "APP": a.nome,
+                "PHFTapp": f"{a.phft * 100:.2f}%",
+                "CgTR [kWh]": f"{a.cgtr:.2f}",
+                "CgTA [kWh]": f"{a.cgta:.2f}",
+                "Tomáx [°C]": f"{a.tomax:.2f}",
+                "Tomín [°C]": f"{a.tomin:.2f}",
+                "Horas ocupadas": a.horas_ocupadas,
+            } for a in res.apps]), hide_index=True, use_container_width=True)
+
+
+if len(resultados_por_uh) == 1:
+    ((res_ref, res_real, cls),) = resultados_por_uh.values()
+    exibir_resultados_uh(res_ref, res_real, cls)
+else:
+    st.divider()
+    st.subheader("Resultado por UH")
+    st.dataframe(
+        pd.DataFrame([
+            {"UH": uh, "Nível": cls.nivel}
+            for uh, (_, _, cls) in resultados_por_uh.items()
+        ]),
+        hide_index=True, use_container_width=True,
+    )
+    for uh, (res_ref, res_real, cls) in resultados_por_uh.items():
+        with st.expander(f"Detalhes - {uh}"):
+            exibir_resultados_uh(res_ref, res_real, cls)
