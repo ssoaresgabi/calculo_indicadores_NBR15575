@@ -568,8 +568,6 @@ with st.sidebar:
     )
 
     tipologia = st.radio("Tipologia", ["Unifamiliar", "Multifamiliar"])
-    pavimento = st.selectbox("Pavimento", PAVIMENTOS,
-                             disabled=(tipologia == "Unifamiliar"))
 
 col_ref, col_real = st.columns(2)
 with col_ref:
@@ -673,14 +671,23 @@ if not apps:
     st.warning("Selecione ao menos um APP.")
     st.stop()
 
-st.subheader("Área útil")
+st.subheader("Dados de cada UH")
+
+pavimentos_uh = {uh: PAVIMENTOS[0] for uh in uhs}
 areas_uh = {}
+
 if len(uhs) <= 1:
-    areas_uh[uhs[0]] = st.number_input("Área útil da UH (m²)", min_value=0.0, step=0.5)
+    uh = uhs[0]
+    if tipologia == "Multifamiliar":
+        pavimentos_uh[uh] = st.selectbox("Pavimento da UH", PAVIMENTOS)
+    areas_uh[uh] = st.number_input("Área útil da UH (m²)", min_value=0.0, step=0.5)
 else:
     for uh in uhs:
-        areas_uh[uh] = st.number_input(f"Área útil de {uh} (m²)", min_value=0.0, step=0.5,
-                                       key=f"area_{uh}")
+        c_pav, c_area = st.columns(2)
+        if tipologia == "Multifamiliar":
+            pavimentos_uh[uh] = c_pav.selectbox(f"Pavimento de {uh}", PAVIMENTOS, key=f"pav_{uh}")
+        areas_uh[uh] = c_area.number_input(f"Área útil de {uh} (m²)", min_value=0.0, step=0.5,
+                                           key=f"area_{uh}")
 
 resultados_por_uh = {}
 for uh in uhs:
@@ -689,7 +696,7 @@ for uh in uhs:
         continue
     res_ref = resultados_modelo(to_ref, cargas_ref, apps_uh, intervalo, areas_uh[uh])
     res_real = resultados_modelo(to_real, cargas_real, apps_uh, intervalo, areas_uh[uh])
-    cls = classificar(res_ref, res_real, tipologia, pavimento, zb)
+    cls = classificar(res_ref, res_real, tipologia, pavimentos_uh[uh], zb)
     resultados_por_uh[uh] = (res_ref, res_real, cls)
 
 if not resultados_por_uh:
