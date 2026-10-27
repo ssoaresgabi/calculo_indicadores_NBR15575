@@ -143,7 +143,7 @@ def chave_tipologia(tipologia: str, pavimento: str) -> str:
 # Leitura dos outputs do EnergyPlus
 # ---------------------------------------------------------------------------
 PADRAO_COLUNA = re.compile(
-    r"^(?P<chave>.*?):(?P<var>[^\[\]]+?)\s*\[(?P<unid>[^\]]*)\]\s*\((?P<freq>[^)]*)\)\s*$"
+    r"^(?P<chave>.*):(?P<var>[^:\[\]]+?)\s*\[(?P<unid>[^\]]*)\]\s*\((?P<freq>[^)]*)\)\s*$"
 )
 
 VARIAVEIS = {
