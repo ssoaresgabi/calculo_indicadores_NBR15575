@@ -1,0 +1,3 @@
+[server]
+# Arquivos SQL de edifícios com várias torres passam fácil dos 200 MB padrão
+maxUploadSize = 1000
