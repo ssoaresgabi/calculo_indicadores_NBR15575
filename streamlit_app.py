@@ -371,17 +371,29 @@ def _e_ambiente(parte: str) -> bool:
     return any(p in parte.upper() for p in PALAVRAS_AMBIENTE)
 
 
-def separar_zona(zona: str, separador: str) -> tuple[str, str]:
-    """Divide o nome da zona em (UH, ambiente), ex.: 'T1_AP101_SALA'."""
-    if not separador or separador not in zona:
+SEPARADORES_AUTO = r"[_\-\s.]+"
+
+
+def separar_zona(zona: str, separador: str = "") -> tuple[str, str]:
+    """
+    Divide o nome da zona em (UH, ambiente), ex.: 'T1_AP101_SALA' ou
+    'UH01-DORM01 1'. Sem separador informado, aceita _, -, espaço e ponto.
+    """
+    padrao = re.escape(separador) if separador else SEPARADORES_AUTO
+    pecas = re.split(f"({padrao})", zona.strip())  # [parte, sep, parte, sep, ...]
+    partes = pecas[0::2]
+    if len(partes) == 1:
         return zona, zona
-    partes = zona.split(separador)
-    for i, parte in enumerate(partes[1:], start=1):
-        if _e_ambiente(parte):
-            return separador.join(partes[:i]), separador.join(partes[i:])
+
+    def corte(i):
+        return "".join(pecas[:2 * i - 1]), "".join(pecas[2 * i:])
+
+    for i in range(1, len(partes)):
+        if _e_ambiente(partes[i]):
+            return corte(i)
     if _e_ambiente(partes[0]):
-        return separador.join(partes[1:]), partes[0]
-    return separador.join(partes[:-1]), partes[-1]
+        return "".join(pecas[2:]), partes[0]
+    return corte(len(partes) - 1)
 
 
 def tipo_app(ambiente: str) -> str | None:
@@ -871,12 +883,13 @@ if not zonas_comuns:
 # ---------------------------------------------------------------------------
 # Identificação das zonas
 # ---------------------------------------------------------------------------
-separador = "_"
+separador = ""
 if multifamiliar:
     with st.expander("Como as zonas são identificadas"):
         st.caption(
             "A UH e o ambiente saem do nome da zona: em 'T1_AP101_SALA', a UH "
-            "é 'T1_AP101' e o ambiente 'SALA'. O tipo de APP vem do nome do "
+            "é 'T1_AP101' e o ambiente 'SALA'; em 'UH01-DORM01 1', a UH é "
+            "'UH01' e o ambiente 'DORM01 1'. O tipo de APP vem do nome do "
             "ambiente (SALA, ESTAR, DORM, QUARTO, SUITE, LOFT, STUDIO...). "
             + ("A torre e o pavimento vêm da posição das zonas no modelo, "
                "a não ser que o nome traga a torre (T1, TORRE2, BLOCO A...)."
@@ -884,7 +897,10 @@ if multifamiliar:
                "A torre e o pavimento vêm do nome (T1, BLOCO A, P03, TERREO, "
                "AP1201...) - confira na revisão abaixo.")
         )
-        separador = st.text_input("Separador entre a UH e o nome do ambiente", value="_")
+        separador = st.text_input(
+            "Separador entre a UH e o nome do ambiente",
+            value="", placeholder="automático ( _  -  espaço  . )",
+        )
 
 zonas = pd.DataFrame({"Zona": zonas_comuns})
 partes = [separar_zona(z, separador) for z in zonas["Zona"]]
