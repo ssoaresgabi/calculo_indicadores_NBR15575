@@ -841,9 +841,7 @@ usa_sql = formato.startswith("SQL")
 if usa_sql:
     st.caption(
         "Inclua `Output:SQLite, SimpleAndTabular;` no IDF e envie o arquivo "
-        "`eplusout.sql` de cada simulação. Nomes, áreas e posição das zonas "
-        "são lidos do próprio arquivo, e só as zonas dos pavimentos escolhidos "
-        "são processadas."
+        "`eplusout.sql` de cada simulação."
     )
 extensoes = ["sql"] if usa_sql else ["csv", "xlsx", "xlsm"]
 
@@ -886,17 +884,6 @@ if not zonas_comuns:
 separador = ""
 if multifamiliar:
     with st.expander("Como as zonas são identificadas"):
-        st.caption(
-            "A UH e o ambiente saem do nome da zona: em 'T1_AP101_SALA', a UH "
-            "é 'T1_AP101' e o ambiente 'SALA'; em 'UH01-DORM01 1', a UH é "
-            "'UH01' e o ambiente 'DORM01 1'. O tipo de APP vem do nome do "
-            "ambiente (SALA, ESTAR, DORM, QUARTO, SUITE, LOFT, STUDIO...). "
-            + ("A torre e o pavimento vêm da posição das zonas no modelo, "
-               "a não ser que o nome traga a torre (T1, TORRE2, BLOCO A...)."
-               if usa_sql else
-               "A torre e o pavimento vêm do nome (T1, BLOCO A, P03, TERREO, "
-               "AP1201...) - confira na revisão abaixo.")
-        )
         separador = st.text_input(
             "Separador entre a UH e o nome do ambiente",
             value="", placeholder="automático ( _  -  espaço  . )",
@@ -1168,8 +1155,6 @@ if len(resultados_por_uh) == 1:
 else:
     st.divider()
     st.subheader("Resultado por UH")
-
-    ORDEM_NIVEIS = ["Não atende ao nível mínimo", "Mínimo", "Intermediário", "Superior"]
     resumo = pd.DataFrame([
         {
             "Torre": info_uh.loc[uh, "Torre"],
@@ -1182,14 +1167,7 @@ else:
         }
         for uh, (ref, real, cls) in resultados_por_uh.items()
     ])
-    pior = min(resumo["Nível"], key=ORDEM_NIVEIS.index)
-    st.markdown(f"Menor nível entre as {len(resumo)} UHs avaliadas: **{pior}**")
     st.dataframe(resumo, hide_index=True, width="stretch")
-    st.download_button(
-        "Baixar resultados (CSV)",
-        resumo.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-        file_name="resultados_nbr15575.csv", mime="text/csv",
-    )
 
     for uh, (res_ref, res_real, cls) in resultados_por_uh.items():
         with st.expander(f"Detalhes - {uh}"):
