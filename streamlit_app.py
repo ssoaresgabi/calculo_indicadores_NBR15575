@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import io
 import re
+import sqlite3
+import tempfile
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -230,6 +234,230 @@ def _para_horario(df: pd.DataFrame) -> pd.DataFrame:
         f"Esperadas {HORAS_ANO} linhas horárias (ou múltiplo); o arquivo tem {n}. "
         "Confira o RunPeriod e a frequência do Output:Variable."
     )
+
+
+# ---------------------------------------------------------------------------
+# Leitura do arquivo SQL do EnergyPlus (Output:SQLite)
+# ---------------------------------------------------------------------------
+NOMES_VARIAVEIS_SQL = {
+    "To": "Zone Operative Temperature",
+    "CgTR": "Zone Ideal Loads Zone Total Cooling Energy",
+    "CgTA": "Zone Ideal Loads Zone Total Heating Energy",
+}
+
+# Preferência quando a mesma variável foi pedida em mais de uma frequência
+FREQUENCIAS_SQL = ("HOURLY", "ZONE TIMESTEP", "TIMESTEP")
+
+
+def ler_zonas_sql(caminho: str) -> pd.DataFrame:
+    """Nome, área de piso e extensão geométrica de cada zona (tabela Zones)."""
+    with closing(sqlite3.connect(caminho)) as con:
+        colunas = {linha[1] for linha in con.execute("PRAGMA table_info(Zones)")}
+        if not colunas:
+            raise ValueError("O arquivo não tem a tabela Zones - é um SQL do EnergyPlus?")
+        parte_area = ", IsPartOfTotalArea" if "IsPartOfTotalArea" in colunas else ""
+        df = pd.read_sql_query(
+            "SELECT ZoneName, FloorArea, MinimumX, MaximumX, MinimumY, MaximumY, "
+            f"MinimumZ{parte_area} FROM Zones",
+            con,
+        )
+    if "IsPartOfTotalArea" not in df.columns:
+        df["IsPartOfTotalArea"] = 1
+    df["ZoneName"] = df["ZoneName"].str.strip().str.upper()
+    return df
+
+
+def _periodos_anuais(con) -> list[int]:
+    """Períodos de simulação com arquivo climático (exclui os dias de projeto)."""
+    env = pd.read_sql_query(
+        "SELECT EnvironmentPeriodIndex AS indice, EnvironmentType AS tipo "
+        "FROM EnvironmentPeriods",
+        con,
+    )
+    anuais = env.loc[env["tipo"] == 3, "indice"]
+    return [int(i) for i in (anuais if not anuais.empty else env["indice"])]
+
+
+def _zona_da_chave(chave: str, nomes_zonas: set[str]) -> str:
+    """Associa a chave do output (zona ou Ideal Loads) ao nome da zona."""
+    z = _nome_zona(chave)
+    if z in nomes_zonas:
+        return z
+    prefixos = [n for n in nomes_zonas if z.startswith(n)]
+    return max(prefixos, key=len) if prefixos else z
+
+
+def ler_series_sql(caminho: str, variaveis: tuple[str, ...], zonas: set[str],
+                   nomes_zonas: set[str], nome: str = "arquivo") -> pd.DataFrame:
+    """
+    Lê do SQL apenas as séries horárias das zonas pedidas, no mesmo formato
+    de ler_saida_energyplus (colunas MultiIndex (zona, variável)).
+    """
+    colunas = {}
+    with closing(sqlite3.connect(caminho)) as con:
+        periodos = _periodos_anuais(con)
+        marcas_periodos = ",".join("?" * len(periodos))
+        for var in variaveis:
+            dic = pd.read_sql_query(
+                "SELECT ReportDataDictionaryIndex AS indice, KeyValue AS chave, "
+                "UPPER(ReportingFrequency) AS freq FROM ReportDataDictionary "
+                "WHERE IsMeter = 0 AND UPPER(Name) = ?",
+                con, params=(NOMES_VARIAVEIS_SQL[var].upper(),),
+            )
+            for freq in FREQUENCIAS_SQL:
+                if (dic["freq"] == freq).any():
+                    dic = dic[dic["freq"] == freq]
+                    break
+            dic["zona"] = [_zona_da_chave(c, nomes_zonas) for c in dic["chave"]]
+            dic = dic[dic["zona"].isin(zonas)].drop_duplicates("zona")
+
+            # Lotes para não passar do limite de parâmetros do SQLite
+            for inicio in range(0, len(dic), 500):
+                lote = dic.iloc[inicio:inicio + 500]
+                indices = [int(i) for i in lote["indice"]]
+                dados = pd.read_sql_query(
+                    "SELECT d.ReportDataDictionaryIndex AS indice, d.Value AS valor "
+                    "FROM ReportData d JOIN Time t ON t.TimeIndex = d.TimeIndex "
+                    f"WHERE d.ReportDataDictionaryIndex IN ({','.join('?' * len(indices))}) "
+                    f"AND t.EnvironmentPeriodIndex IN ({marcas_periodos}) "
+                    "AND (t.WarmupFlag IS NULL OR t.WarmupFlag = 0) "
+                    "ORDER BY d.ReportDataDictionaryIndex, d.TimeIndex",
+                    con, params=[*indices, *periodos],
+                )
+                zona_do_indice = dict(zip(indices, lote["zona"]))
+                for indice, grupo in dados.groupby("indice", sort=False):
+                    colunas[(zona_do_indice[int(indice)], var)] = grupo["valor"].to_numpy()
+
+    if not colunas:
+        esperadas = ", ".join(NOMES_VARIAVEIS_SQL[v] for v in variaveis)
+        raise ValueError(f"Nenhuma série de {esperadas} encontrada em '{nome}'.")
+
+    tamanhos = {len(v) for v in colunas.values()}
+    if len(tamanhos) > 1:
+        raise ValueError(
+            f"'{nome}': as séries têm tamanhos diferentes ({sorted(tamanhos)}). "
+            "Confira se todas as variáveis foram pedidas na mesma frequência."
+        )
+    df = pd.DataFrame(colunas)
+    df.columns = pd.MultiIndex.from_tuples(df.columns, names=["zona", "variavel"])
+    return _para_horario(df)
+
+
+# ---------------------------------------------------------------------------
+# Identificação automática de UH, tipo de APP, torre e pavimento
+# ---------------------------------------------------------------------------
+# A ordem importa: banheiro de suíte não é dormitório, e sala integrada à
+# cozinha continua sendo sala.
+PALAVRAS_NAO_APP = ("BANH", "BWC", "WC", "LAVABO", "SANIT", "CLOSET")
+PALAVRAS_APP = {
+    "misto": ("LOFT", "STUDIO", "KITNET", "QUITINETE", "MISTO", "CONJUGADO"),
+    "dormitorio": ("DORM", "QUARTO", "QTO", "SUITE", "SUÍTE"),
+    "sala": ("SALA", "ESTAR", "LIVING"),
+}
+PALAVRAS_AMBIENTE = (
+    PALAVRAS_NAO_APP
+    + tuple(p for palavras in PALAVRAS_APP.values() for p in palavras)
+    + ("COZ", "CIRC", "HALL", "SERV", "LAV", "VARANDA", "SACADA", "DESP",
+       "ESCADA", "CORREDOR", "JANTAR", "ATICO", "ÁTICO", "GARAGEM", "AREA", "ÁREA")
+)
+
+PADRAO_TORRE = re.compile(r"^(?:TORRE|TOR|BLOCO|BL|T)[\s\-]?0*([0-9]+|[A-Z])$")
+PADRAO_PAVIMENTO = re.compile(r"^(?:PAVTO|PAV|PV|ANDAR|P|N)[\s\-]?0*([0-9]+)$")
+PADRAO_APARTAMENTO = re.compile(r"^(?:APTO|APT|AP|UH|U)[\s\-]?0*([0-9]{3,4})$")
+NOMES_TERREO = {"TERREO", "TÉRREO", "TER"}
+
+
+def _e_ambiente(parte: str) -> bool:
+    return any(p in parte.upper() for p in PALAVRAS_AMBIENTE)
+
+
+def separar_zona(zona: str, separador: str) -> tuple[str, str]:
+    """Divide o nome da zona em (UH, ambiente), ex.: 'T1_AP101_SALA'."""
+    if not separador or separador not in zona:
+        return zona, zona
+    partes = zona.split(separador)
+    for i, parte in enumerate(partes[1:], start=1):
+        if _e_ambiente(parte):
+            return separador.join(partes[:i]), separador.join(partes[i:])
+    if _e_ambiente(partes[0]):
+        return separador.join(partes[1:]), partes[0]
+    return separador.join(partes[:-1]), partes[-1]
+
+
+def tipo_app(ambiente: str) -> str | None:
+    """'sala', 'dormitorio', 'misto' ou None (não é APP), pelo nome do ambiente."""
+    nome = ambiente.upper()
+    if any(p in nome for p in PALAVRAS_NAO_APP):
+        return None
+    for tipo, palavras in PALAVRAS_APP.items():
+        if any(p in nome for p in palavras):
+            return tipo
+    return None
+
+
+def _partes_nome(nome: str) -> list[str]:
+    return [p for p in re.split(r"[_\-\s.]+", nome.upper()) if p]
+
+
+def torre_pelo_nome(uh: str) -> str | None:
+    for parte in _partes_nome(uh):
+        m = PADRAO_TORRE.match(parte)
+        if m:
+            return f"T{m.group(1)}"
+    return None
+
+
+def pavimento_pelo_nome(uh: str) -> int | None:
+    """Pavimento indicado no nome ('P03', 'TERREO', 'AP1201' -> 12)."""
+    for parte in _partes_nome(uh):
+        if parte in NOMES_TERREO:
+            return 0
+        m = PADRAO_PAVIMENTO.match(parte)
+        if m:
+            return int(m.group(1))
+    for parte in _partes_nome(uh):
+        m = PADRAO_APARTAMENTO.match(parte)
+        if m:
+            return int(m.group(1)) // 100
+    return None
+
+
+def agrupar_torres(geo: pd.DataFrame, folga: float = 3.0) -> pd.Series:
+    """
+    Agrupa em torres as zonas cujas projeções em planta se tocam (com uma
+    folga para corredores), numeradas de oeste para leste.
+    """
+    x0, x1 = geo["MinimumX"].to_numpy(), geo["MaximumX"].to_numpy()
+    y0, y1 = geo["MinimumY"].to_numpy(), geo["MaximumY"].to_numpy()
+    pai = np.arange(len(geo))
+
+    def raiz(i):
+        while pai[i] != i:
+            pai[i] = pai[pai[i]]
+            i = pai[i]
+        return i
+
+    for i in range(len(geo)):
+        toca = ((x0 <= x1[i] + folga) & (x1 >= x0[i] - folga)
+                & (y0 <= y1[i] + folga) & (y1 >= y0[i] - folga))
+        for j in np.nonzero(toca)[0]:
+            ri, rj = raiz(i), raiz(j)
+            if ri != rj:
+                pai[rj] = ri
+
+    raizes = [raiz(i) for i in range(len(geo))]
+    ordem = pd.Series(x0).groupby(raizes).min().sort_values().index
+    rotulo = {r: f"T{k}" for k, r in enumerate(ordem, start=1)}
+    return pd.Series([rotulo[r] for r in raizes], index=geo.index)
+
+
+def numerar_pavimentos(cotas: pd.Series, tolerancia: float = 0.5) -> pd.Series:
+    """Numera os pavimentos (1 = mais baixo) agrupando cotas próximas."""
+    niveis = []
+    for cota in sorted(cotas.dropna().unique()):
+        if not niveis or cota - niveis[-1] > tolerancia:
+            niveis.append(cota)
+    return cotas.map(lambda c: sum(1 for n in niveis if c >= n - 1e-6))
 
 
 # ---------------------------------------------------------------------------
@@ -462,16 +690,16 @@ def carregar_climas() -> pd.DataFrame | None:
     return df if not df.empty else None
 
 
-def bloco_upload(rotulo: str, chave: str):
+def bloco_upload(rotulo: str, chave: str, extensoes: list[str]):
     """Par de uploads (VN + AC) para um modelo."""
     st.markdown(f"**{rotulo}**")
     vn = st.file_uploader(
         f"Ventilação natural - Zone Operative Temperature ({rotulo})",
-        type=["csv", "xlsx", "xlsm"], key=f"vn_{chave}",
+        type=extensoes, key=f"vn_{chave}",
     )
     ac = st.file_uploader(
         f"Ar-condicionado - Zone Ideal Loads Total Heating/Cooling Energy ({rotulo})",
-        type=["csv", "xlsx", "xlsm"], key=f"ac_{chave}",
+        type=extensoes, key=f"ac_{chave}",
     )
     return vn, ac
 
@@ -488,6 +716,28 @@ def carregar_modelo(vn_file, ac_file, rotulo: str):
     if not {"CgTR", "CgTA"} & vars_carga:
         raise ValueError(f"{rotulo}: nenhuma carga de Ideal Loads encontrada.")
     return to, cargas, zonas_to
+
+
+def caminho_local(arquivo) -> str:
+    """O sqlite3 só abre arquivos em disco: grava cada upload uma vez por sessão."""
+    salvos = st.session_state.setdefault("_sql_salvos", {})
+    chave = getattr(arquivo, "file_id", None) or f"{arquivo.name}:{arquivo.size}"
+    if chave not in salvos or not Path(salvos[chave]).exists():
+        with tempfile.NamedTemporaryFile(suffix=".sql", delete=False) as fh:
+            fh.write(arquivo.getbuffer())
+        salvos[chave] = fh.name
+    return salvos[chave]
+
+
+@st.cache_data(show_spinner="Lendo as zonas do arquivo SQL...")
+def zonas_sql(caminho: str) -> pd.DataFrame:
+    return ler_zonas_sql(caminho)
+
+
+@st.cache_data(show_spinner="Lendo os resultados horários do arquivo SQL...")
+def series_sql(caminho: str, variaveis: tuple[str, ...], zonas: tuple[str, ...],
+               nomes_zonas: tuple[str, ...], nome: str) -> pd.DataFrame:
+    return ler_series_sql(caminho, variaveis, set(zonas), set(nomes_zonas), nome)
 
 
 def resultados_modelo(to, cargas, apps, intervalo, area_total):
@@ -511,7 +761,7 @@ def tabela_uh(res, titulo):
                           f"{res.cgtt:.2f}", f"{res.tomax:.2f}", f"{res.tomin:.2f}"],
             }
         ),
-        hide_index=True, use_container_width=True,
+        hide_index=True, width="stretch",
     )
 
 
@@ -569,54 +819,198 @@ with st.sidebar:
 
     tipologia = st.radio("Tipologia", ["Unifamiliar", "Multifamiliar"])
 
+multifamiliar = tipologia == "Multifamiliar"
+
+formato = st.radio(
+    "Formato dos arquivos de saída do EnergyPlus",
+    ["SQL (Output:SQLite)", "CSV ou Excel"], horizontal=True,
+)
+usa_sql = formato.startswith("SQL")
+if usa_sql:
+    st.caption(
+        "Inclua `Output:SQLite, SimpleAndTabular;` no IDF e envie o arquivo "
+        "`eplusout.sql` de cada simulação. Nomes, áreas e posição das zonas "
+        "são lidos do próprio arquivo, e só as zonas dos pavimentos escolhidos "
+        "são processadas."
+    )
+extensoes = ["sql"] if usa_sql else ["csv", "xlsx", "xlsm"]
+
 col_ref, col_real = st.columns(2)
 with col_ref:
-    vn_ref, ac_ref = bloco_upload("Modelo de REFERÊNCIA", "ref")
+    vn_ref, ac_ref = bloco_upload("Modelo de REFERÊNCIA", "ref", extensoes)
 with col_real:
-    vn_real, ac_real = bloco_upload("Modelo REAL", "real")
+    vn_real, ac_real = bloco_upload("Modelo REAL", "real", extensoes)
 
 if not all([vn_ref, ac_ref, vn_real, ac_real]):
     st.warning("Envie os quatro arquivos de saída do EnergyPlus para prosseguir.")
     st.stop()
 
+geo = None
 try:
-    to_ref, cargas_ref, zonas_ref = carregar_modelo(vn_ref, ac_ref, "Referência")
-    to_real, cargas_real, zonas_real = carregar_modelo(vn_real, ac_real, "Real")
-except ValueError as e:
-    st.error(str(e))
+    if usa_sql:
+        caminhos = {
+            "vn_ref": caminho_local(vn_ref), "ac_ref": caminho_local(ac_ref),
+            "vn_real": caminho_local(vn_real), "ac_real": caminho_local(ac_real),
+        }
+        geo = zonas_sql(caminhos["vn_real"])
+        nomes_ref = set(zonas_sql(caminhos["vn_ref"])["ZoneName"])
+        geo = geo[geo["ZoneName"].isin(nomes_ref)].set_index("ZoneName")
+        zonas_comuns = sorted(geo.index)
+    else:
+        to_ref, cargas_ref, zonas_ref = carregar_modelo(vn_ref, ac_ref, "Referência")
+        to_real, cargas_real, zonas_real = carregar_modelo(vn_real, ac_real, "Real")
+        zonas_comuns = [z for z in zonas_ref if z in zonas_real]
+except (ValueError, sqlite3.Error, pd.errors.DatabaseError) as e:
+    st.error(f"Não foi possível ler os arquivos: {e}")
     st.stop()
 
-zonas_comuns = [z for z in zonas_ref if z in zonas_real]
 if not zonas_comuns:
     st.error("Os modelos de referência e real não têm zonas com o mesmo nome.")
     st.stop()
 
-zona_para_uh = {zona: "UH" for zona in zonas_comuns}
+# ---------------------------------------------------------------------------
+# Identificação das zonas
+# ---------------------------------------------------------------------------
+separador = "_"
+if multifamiliar:
+    with st.expander("Como as zonas são identificadas"):
+        st.caption(
+            "A UH e o ambiente saem do nome da zona: em 'T1_AP101_SALA', a UH "
+            "é 'T1_AP101' e o ambiente 'SALA'. O tipo de APP vem do nome do "
+            "ambiente (SALA, ESTAR, DORM, QUARTO, SUITE, LOFT, STUDIO...). "
+            + ("A torre e o pavimento vêm da posição das zonas no modelo, "
+               "a não ser que o nome traga a torre (T1, TORRE2, BLOCO A...)."
+               if usa_sql else
+               "A torre e o pavimento vêm do nome (T1, BLOCO A, P03, TERREO, "
+               "AP1201...) - confira na revisão abaixo.")
+        )
+        separador = st.text_input("Separador entre a UH e o nome do ambiente", value="_")
 
-if tipologia == "Multifamiliar":
-    st.subheader("Unidades habitacionais")
+zonas = pd.DataFrame({"Zona": zonas_comuns})
+partes = [separar_zona(z, separador) for z in zonas["Zona"]]
+zonas["UH"] = [uh for uh, _ in partes] if multifamiliar else "UH"
+zonas["Tipo"] = [tipo_app(amb) for _, amb in partes]
+
+if zonas["Tipo"].isna().all():
+    st.info(
+        "Nenhum nome de zona indicou sala ou dormitório - todas foram marcadas "
+        "como dormitório. Ajuste os tipos na tabela de APPs."
+    )
+    zonas["Tipo"] = "dormitorio"
+
+# UHs com ao menos um APP sugerido, com torre, pavimento e área
+uhs_com_app = sorted(zonas.loc[zonas["Tipo"].notna(), "UH"].unique())
+zonas_das_uhs = zonas[zonas["UH"].isin(uhs_com_app)]
+info_uh = pd.DataFrame({"UH": uhs_com_app}).set_index("UH")
+
+if usa_sql:
+    na_area = geo["IsPartOfTotalArea"].fillna(1) != 0
+    area_zona = geo["FloorArea"].where(na_area, 0.0)
+    info_uh["Área útil (m²)"] = zonas_das_uhs.groupby("UH")["Zona"].agg(
+        lambda zs: float(area_zona.loc[list(zs)].sum()))
+    apps_sugeridos = zonas_das_uhs[zonas_das_uhs["Tipo"].notna()]
+    info_uh["Cota (m)"] = apps_sugeridos.groupby("UH")["Zona"].agg(
+        lambda zs: float(geo.loc[list(zs), "MinimumZ"].min()))
+else:
+    info_uh["Área útil (m²)"] = 0.0
+    info_uh["Cota (m)"] = np.nan
+
+if multifamiliar:
+    torres_nome = {uh: torre_pelo_nome(uh) for uh in uhs_com_app}
+    if all(torres_nome.values()):
+        info_uh["Torre"] = pd.Series(torres_nome)
+    elif usa_sql:
+        torre_zona = agrupar_torres(geo.loc[zonas_das_uhs["Zona"]])
+        info_uh["Torre"] = torre_zona.groupby(zonas_das_uhs.set_index("Zona")["UH"]).agg(
+            lambda s: s.mode().iloc[0])
+    else:
+        info_uh["Torre"] = "T1"
+
+    if usa_sql:
+        info_uh["Pavimento"] = 0
+        for torre, grupo in info_uh.groupby("Torre"):
+            info_uh.loc[grupo.index, "Pavimento"] = numerar_pavimentos(grupo["Cota (m)"])
+    else:
+        info_uh["Pavimento"] = [pavimento_pelo_nome(uh) or 1 for uh in uhs_com_app]
+    info_uh["Pavimento"] = info_uh["Pavimento"].astype(int)
+
+    with st.expander(
+        f"Revisar torre e pavimento das UHs ({len(uhs_com_app)} UHs em "
+        f"{info_uh['Torre'].nunique()} torre(s))"
+    ):
+        st.caption(
+            "Pavimento é a ordem de baixo para cima (1 = mais baixo). Corrija "
+            "aqui se alguma UH ficou na torre ou no pavimento errado."
+        )
+        revisado = st.data_editor(
+            info_uh.reset_index()[["UH", "Torre", "Pavimento", "Cota (m)"]],
+            hide_index=True, width="stretch", key="ed_torres",
+            disabled=["UH", "Cota (m)"],
+            column_config={
+                "Pavimento": st.column_config.NumberColumn(min_value=0, step=1),
+                "Cota (m)": st.column_config.NumberColumn(format="%.2f"),
+            },
+        ).set_index("UH")
+        info_uh["Torre"] = revisado["Torre"].astype(str)
+        info_uh["Pavimento"] = revisado["Pavimento"].fillna(0).astype(int)
+
+    # -----------------------------------------------------------------------
+    st.subheader("Pavimentos avaliados")
     st.caption(
-        "O arquivo traz zonas de várias UHs. Informe o separador que vem "
-        "antes do nome do ambiente (ex.: em 'UH01_SALA', o separador é "
-        "\"_\") para agrupar as zonas por UH automaticamente - e corrija "
-        "manualmente se alguma não ficar certa."
+        "Escolha, em cada torre, o pavimento térreo, um pavimento tipo e a "
+        "cobertura. Só as UHs desses pavimentos são calculadas."
     )
-    separador = st.text_input("Separador entre a UH e o nome do ambiente", value="_")
+    cotas_pav = info_uh.groupby(["Torre", "Pavimento"])["Cota (m)"].min()
+    categoria_pav = {}
+    for torre in sorted(info_uh["Torre"].unique()):
+        niveis = sorted(int(n) for n in info_uh.loc[info_uh["Torre"] == torre, "Pavimento"].unique())
 
-    def _uh_da_zona(zona: str) -> str:
-        if separador and separador in zona:
-            return zona.split(separador)[0]
-        return zona
+        def rotulo_pav(n, torre=torre):
+            if n is None:
+                return "(nenhum)"
+            cota = cotas_pav.get((torre, n), np.nan)
+            n_uhs = int(((info_uh["Torre"] == torre) & (info_uh["Pavimento"] == n)).sum())
+            texto = f"Pav. {n} - {n_uhs} UH(s)"
+            return texto if pd.isna(cota) else f"{texto} - z = {cota:.2f} m"
 
-    tabela_uhs = st.data_editor(
-        pd.DataFrame({"Zona": zonas_comuns, "UH": [_uh_da_zona(z) for z in zonas_comuns]}),
-        hide_index=True, use_container_width=True,
-        column_config={"Zona": st.column_config.TextColumn(disabled=True)},
-    )
-    zona_para_uh = dict(zip(tabela_uhs["Zona"], tabela_uhs["UH"]))
+        opcoes_pav = [None, *niveis]
+        idx_tipo = 1 + len(niveis) // 2 if len(niveis) >= 3 else 0
+        idx_cob = len(niveis) if len(niveis) >= 2 else 0
 
-uhs = sorted(set(zona_para_uh.values()))
+        st.markdown(f"**Torre {torre}** - {len(niveis)} pavimento(s)")
+        c_ter, c_tipo, c_cob = st.columns(3)
+        terreo = c_ter.selectbox("Térreo", opcoes_pav, index=1, format_func=rotulo_pav,
+                                 key=f"pav_ter_{torre}")
+        pilotis = c_ter.checkbox("Sobre pilotis ou subsolo", key=f"pilotis_{torre}")
+        tipo_pav = c_tipo.selectbox("Tipo", opcoes_pav, index=idx_tipo, format_func=rotulo_pav,
+                                    key=f"pav_tipo_{torre}")
+        cobertura = c_cob.selectbox("Cobertura", opcoes_pav, index=idx_cob,
+                                    format_func=rotulo_pav, key=f"pav_cob_{torre}")
 
+        escolhidos = [n for n in (terreo, tipo_pav, cobertura) if n is not None]
+        if len(set(escolhidos)) < len(escolhidos):
+            st.error(f"Torre {torre}: o mesmo pavimento foi escolhido duas vezes.")
+            st.stop()
+        if terreo is not None:
+            categoria_pav[(torre, terreo)] = "Pilotis ou com subsolo" if pilotis else "Térreo"
+        if tipo_pav is not None:
+            categoria_pav[(torre, tipo_pav)] = "Tipo"
+        if cobertura is not None:
+            categoria_pav[(torre, cobertura)] = "Cobertura"
+
+    info_uh["Categoria"] = [
+        categoria_pav.get((t, p)) for t, p in zip(info_uh["Torre"], info_uh["Pavimento"])
+    ]
+    info_uh = info_uh[info_uh["Categoria"].notna()]
+    if info_uh.empty:
+        st.warning("Escolha ao menos um pavimento.")
+        st.stop()
+else:
+    info_uh["Torre"] = "-"
+    info_uh["Pavimento"] = 0
+    info_uh["Categoria"] = PAVIMENTOS[0]
+
+# ---------------------------------------------------------------------------
 st.subheader("Ambientes de permanência prolongada")
 
 DICA_APP = (
@@ -625,87 +1019,96 @@ DICA_APP = (
     "que funciona como sala e dormitório no mesmo espaço (quitinetes, "
     "lofts, studios)."
 )
+st.caption(DICA_APP + " O tipo foi sugerido pelo nome da zona - corrija se precisar.")
 
 OPCOES_TIPO = {"Sala": "sala", "Dormitório": "dormitorio", "Misto": "misto"}
+NAO_APP = "Não é APP"
+ROTULO_TIPO = {v: k for k, v in OPCOES_TIPO.items()}
 
-with st.container(key="tabela_apps"):
-    st.markdown(
-        """
-        <style>
-        .st-key-tabela_apps > div[data-testid="stVerticalBlock"] {
-            gap: 1rem;
-        }
-        .st-key-tabela_apps_corpo > div[data-testid="stVerticalBlock"] {
-            gap: 0.1rem;
-        }
-        .st-key-tabela_apps .cabecalho-apps {
-            font-weight: 700;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+zonas_sel = zonas[zonas["UH"].isin(info_uh.index)]
+tabela_apps = st.data_editor(
+    pd.DataFrame({
+        "Zona": zonas_sel["Zona"],
+        "UH": zonas_sel["UH"],
+        "Tipo": [ROTULO_TIPO.get(t, NAO_APP) for t in zonas_sel["Tipo"]],
+    }),
+    hide_index=True, width="stretch", key="ed_apps",
+    disabled=["Zona", "UH"],
+    column_config={
+        "Tipo": st.column_config.SelectboxColumn(
+            options=[*OPCOES_TIPO, NAO_APP], required=True, help=DICA_APP),
+    },
+)
 
-    col_zona, col_app, col_tipo = st.columns([2, 1, 2], gap="small")
-    col_zona.markdown('<div class="cabecalho-apps">Zona</div>', unsafe_allow_html=True)
-    col_app.markdown(
-        f'<div class="cabecalho-apps" title="{DICA_APP}">APP&nbsp;ℹ️</div>',
-        unsafe_allow_html=True,
-    )
-    col_tipo.markdown('<div class="cabecalho-apps">Tipo</div>', unsafe_allow_html=True)
-
-    apps = []
-    with st.container(key="tabela_apps_corpo"):
-        for zona in zonas_comuns:
-            col_zona, col_app, col_tipo = st.columns([2, 1, 2], gap="small")
-            col_zona.write(zona)
-            e_app = col_app.checkbox("APP", value=True, key=f"eapp_{zona}",
-                                     label_visibility="collapsed")
-            tipo_label = col_tipo.selectbox("Tipo", list(OPCOES_TIPO.keys()), index=1,
-                                            key=f"tipo_{zona}", disabled=not e_app,
-                                            label_visibility="collapsed")
-            if e_app:
-                apps.append(APP(nome=zona, zona=zona, tipo=OPCOES_TIPO[tipo_label]))
-
+apps = [
+    APP(nome=z, zona=z, tipo=OPCOES_TIPO[t])
+    for z, t in zip(tabela_apps["Zona"], tabela_apps["Tipo"]) if t in OPCOES_TIPO
+]
 if not apps:
     st.warning("Selecione ao menos um APP.")
     st.stop()
+zona_para_uh = dict(zip(tabela_apps["Zona"], tabela_apps["UH"]))
 
+# ---------------------------------------------------------------------------
 st.subheader("Dados de cada UH")
+if usa_sql:
+    st.caption(
+        "A área foi somada a partir das áreas de piso das zonas de cada UH "
+        "(tabela Zones do SQL). Confira se corresponde à área útil."
+    )
+colunas_uh = ["UH", "Torre", "Categoria", "Área útil (m²)"] if multifamiliar \
+    else ["UH", "Área útil (m²)"]
+dados_uh = st.data_editor(
+    info_uh.reset_index()[colunas_uh],
+    hide_index=True, width="stretch", key="ed_dados_uh",
+    disabled=["UH", "Torre", "Categoria"],
+    column_config={
+        "Categoria": st.column_config.TextColumn("Pavimento"),
+        "Área útil (m²)": st.column_config.NumberColumn(min_value=0.0, step=0.5, format="%.2f"),
+    },
+).set_index("UH")
+areas_uh = dados_uh["Área útil (m²)"].fillna(0.0).to_dict()
 
-pavimentos_uh = {uh: PAVIMENTOS[0] for uh in uhs}
-areas_uh = {}
+uhs = [uh for uh in info_uh.index if any(zona_para_uh[a.zona] == uh for a in apps)]
+sem_area = [uh for uh in uhs if areas_uh.get(uh, 0) <= 0]
+if sem_area:
+    st.error("Informe a área útil de: " + ", ".join(sem_area))
+    st.stop()
 
-if len(uhs) <= 1:
-    uh = uhs[0]
-    if tipologia == "Multifamiliar":
-        pavimentos_uh[uh] = st.selectbox("Pavimento da UH", PAVIMENTOS)
-    areas_uh[uh] = st.number_input("Área útil da UH (m²)", min_value=0.0, step=0.5)
-else:
-    for uh in uhs:
-        c_pav, c_area = st.columns(2)
-        if tipologia == "Multifamiliar":
-            pavimentos_uh[uh] = c_pav.selectbox(f"Pavimento de {uh}", PAVIMENTOS, key=f"pav_{uh}")
-        areas_uh[uh] = c_area.number_input(f"Área útil de {uh} (m²)", min_value=0.0, step=0.5,
-                                           key=f"area_{uh}")
+# ---------------------------------------------------------------------------
+if usa_sql:
+    zonas_app = tuple(sorted(a.zona for a in apps if zona_para_uh[a.zona] in uhs))
+    nomes = tuple(zonas_comuns)
+    try:
+        to_ref = series_sql(caminhos["vn_ref"], ("To",), zonas_app, nomes, vn_ref.name)
+        cargas_ref = series_sql(caminhos["ac_ref"], ("CgTR", "CgTA"), zonas_app, nomes, ac_ref.name)
+        to_real = series_sql(caminhos["vn_real"], ("To",), zonas_app, nomes, vn_real.name)
+        cargas_real = series_sql(caminhos["ac_real"], ("CgTR", "CgTA"), zonas_app, nomes,
+                                 ac_real.name)
+    except (ValueError, sqlite3.Error, pd.errors.DatabaseError) as e:
+        st.error(str(e))
+        st.stop()
+
+    for rotulo, df in (("referência", to_ref), ("real", to_real)):
+        faltando = [z for z in zonas_app if (z, "To") not in df.columns]
+        if faltando:
+            st.error(
+                f"Modelo {rotulo}: sem Zone Operative Temperature para "
+                + ", ".join(faltando[:10]) + (" ..." if len(faltando) > 10 else "")
+            )
+            st.stop()
 
 resultados_por_uh = {}
 for uh in uhs:
     apps_uh = [a for a in apps if zona_para_uh[a.zona] == uh]
-    if not apps_uh:
-        continue
+    categoria = info_uh.loc[uh, "Categoria"]
     res_ref = resultados_modelo(to_ref, cargas_ref, apps_uh, intervalo, areas_uh[uh])
     res_real = resultados_modelo(to_real, cargas_real, apps_uh, intervalo, areas_uh[uh])
-    cls = classificar(res_ref, res_real, tipologia, pavimentos_uh[uh], zb)
+    cls = classificar(res_ref, res_real, tipologia, categoria, zb)
     resultados_por_uh[uh] = (res_ref, res_real, cls)
 
 if not resultados_por_uh:
     st.warning("Nenhuma UH com APP selecionado.")
-    st.stop()
-
-sem_area = [uh for uh in resultados_por_uh if areas_uh[uh] <= 0]
-if sem_area:
-    st.error("Informe a área útil de: " + ", ".join(sem_area))
     st.stop()
 
 
@@ -727,7 +1130,7 @@ def exibir_resultados_uh(res_ref, res_real, cls):
         for nivel, criterios in cls.criterios.items()
         for k in criterios
     ]
-    st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
 
     with st.expander("Resultados por APP"):
         for rotulo, res in (("Referência", res_ref), ("Real", res_real)):
@@ -740,7 +1143,7 @@ def exibir_resultados_uh(res_ref, res_real, cls):
                 "Tomáx [°C]": f"{a.tomax:.2f}",
                 "Tomín [°C]": f"{a.tomin:.2f}",
                 "Horas ocupadas": a.horas_ocupadas,
-            } for a in res.apps]), hide_index=True, use_container_width=True)
+            } for a in res.apps]), hide_index=True, width="stretch")
 
 
 if len(resultados_por_uh) == 1:
@@ -749,13 +1152,30 @@ if len(resultados_por_uh) == 1:
 else:
     st.divider()
     st.subheader("Resultado por UH")
-    st.dataframe(
-        pd.DataFrame([
-            {"UH": uh, "Nível": cls.nivel}
-            for uh, (_, _, cls) in resultados_por_uh.items()
-        ]),
-        hide_index=True, use_container_width=True,
+
+    ORDEM_NIVEIS = ["Não atende ao nível mínimo", "Mínimo", "Intermediário", "Superior"]
+    resumo = pd.DataFrame([
+        {
+            "Torre": info_uh.loc[uh, "Torre"],
+            "Pavimento": info_uh.loc[uh, "Categoria"],
+            "UH": uh,
+            "Nível": cls.nivel,
+            "PHFT ref": round(ref.phft * 100, 2),
+            "PHFT real": round(real.phft * 100, 2),
+            "RedCgTT (%)": round(cls.red_cgtt * 100, 2),
+        }
+        for uh, (ref, real, cls) in resultados_por_uh.items()
+    ])
+    pior = min(resumo["Nível"], key=ORDEM_NIVEIS.index)
+    st.markdown(f"Menor nível entre as {len(resumo)} UHs avaliadas: **{pior}**")
+    st.dataframe(resumo, hide_index=True, width="stretch")
+    st.download_button(
+        "Baixar resultados (CSV)",
+        resumo.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+        file_name="resultados_nbr15575.csv", mime="text/csv",
     )
+
     for uh, (res_ref, res_real, cls) in resultados_por_uh.items():
         with st.expander(f"Detalhes - {uh}"):
             exibir_resultados_uh(res_ref, res_real, cls)
+
