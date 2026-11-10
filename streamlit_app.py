@@ -130,6 +130,15 @@ RED_CGTT = {
 
 PAVIMENTOS = ["Térreo", "Tipo", "Pilotis ou com subsolo", "Cobertura"]
 
+# Exposição do pavimento escolhida pelo usuário -> categoria usada nos limites
+EXPOSICOES = {
+    "Contato com o solo": "Térreo",
+    "Sobre pilotis ou subsolo": "Pilotis ou com subsolo",
+    "Tipo": "Tipo",
+    "Cobertura exposta": "Cobertura",
+}
+ROTULO_EXPOSICAO = {v: k for k, v in EXPOSICOES.items()}
+
 
 def chave_tipologia(tipologia: str, pavimento: str) -> str:
     if tipologia.lower().startswith("uni"):
@@ -907,15 +916,10 @@ zonas_das_uhs = zonas[zonas["UH"].isin(uhs_com_app)]
 info_uh = pd.DataFrame({"UH": uhs_com_app}).set_index("UH")
 
 if usa_sql:
-    na_area = geo["IsPartOfTotalArea"].fillna(1) != 0
-    area_zona = geo["FloorArea"].where(na_area, 0.0)
-    info_uh["Área útil (m²)"] = zonas_das_uhs.groupby("UH")["Zona"].agg(
-        lambda zs: float(area_zona.loc[list(zs)].sum()))
     apps_sugeridos = zonas_das_uhs[zonas_das_uhs["Tipo"].notna()]
     info_uh["Cota (m)"] = apps_sugeridos.groupby("UH")["Zona"].agg(
         lambda zs: float(geo.loc[list(zs), "MinimumZ"].min()))
 else:
-    info_uh["Área útil (m²)"] = 0.0
     info_uh["Cota (m)"] = np.nan
 
 if multifamiliar:
@@ -960,53 +964,60 @@ if multifamiliar:
     # -----------------------------------------------------------------------
     st.subheader("Pavimentos avaliados")
     st.caption(
-        "Escolha, em cada torre, o pavimento térreo, um pavimento tipo e a "
-        "cobertura. Só as UHs desses pavimentos são calculadas."
+        "Marque os pavimentos que serão calculados e indique a exposição de cada um. "
+        "Pode haver mais de um pavimento tipo por torre."
     )
-    cotas_pav = info_uh.groupby(["Torre", "Pavimento"])["Cota (m)"].min()
-    categoria_pav = {}
-    for torre in sorted(info_uh["Torre"].unique()):
-        niveis = sorted(int(n) for n in info_uh.loc[info_uh["Torre"] == torre, "Pavimento"].unique())
+    pavs = (
+        info_uh.reset_index()
+        .groupby(["Torre", "Pavimento"])
+        .agg(UHs=("UH", "size"), Cota=("Cota (m)", "min"))
+        .reset_index()
+        .sort_values(["Torre", "Pavimento"])
+    )
+    avaliar, exposicao = [], []
+    for _, grupo in pavs.groupby("Torre", sort=False):
+        n = len(grupo)
+        meio = n // 2 if n >= 3 else None
+        for i in range(n):
+            if i == 0:
+                avaliar.append(True)
+                exposicao.append("Contato com o solo")
+            elif i == n - 1:
+                avaliar.append(True)
+                exposicao.append("Cobertura exposta")
+            else:
+                avaliar.append(i == meio)
+                exposicao.append("Tipo")
+    pavs.insert(0, "Avaliar", avaliar)
+    pavs["Exposição"] = exposicao
+    pavs = pavs.rename(columns={"Cota": "Cota (m)"})
 
-        def rotulo_pav(n, torre=torre):
-            if n is None:
-                return "(nenhum)"
-            cota = cotas_pav.get((torre, n), np.nan)
-            n_uhs = int(((info_uh["Torre"] == torre) & (info_uh["Pavimento"] == n)).sum())
-            texto = f"Pav. {n} - {n_uhs} UH(s)"
-            return texto if pd.isna(cota) else f"{texto} - z = {cota:.2f} m"
+    # A chave muda se torres/pavimentos mudarem, para não aplicar edições na linha errada
+    chave_pavs = "ed_pavs_" + str(abs(hash(tuple(zip(pavs["Torre"], pavs["Pavimento"])))))
+    pavs_ed = st.data_editor(
+        pavs[["Avaliar", "Torre", "Pavimento", "UHs", "Cota (m)", "Exposição"]],
+        hide_index=True, width="stretch", key=chave_pavs,
+        disabled=["Torre", "Pavimento", "UHs", "Cota (m)"],
+        column_config={
+            "Avaliar": st.column_config.CheckboxColumn(),
+            "Cota (m)": st.column_config.NumberColumn(format="%.2f"),
+            "Exposição": st.column_config.SelectboxColumn(
+                options=list(EXPOSICOES), required=True),
+        },
+    )
 
-        opcoes_pav = [None, *niveis]
-        idx_tipo = 1 + len(niveis) // 2 if len(niveis) >= 3 else 0
-        idx_cob = len(niveis) if len(niveis) >= 2 else 0
-
-        st.markdown(f"**Torre {torre}** - {len(niveis)} pavimento(s)")
-        c_ter, c_tipo, c_cob = st.columns(3)
-        terreo = c_ter.selectbox("Térreo", opcoes_pav, index=1, format_func=rotulo_pav,
-                                 key=f"pav_ter_{torre}")
-        pilotis = c_ter.checkbox("Sobre pilotis ou subsolo", key=f"pilotis_{torre}")
-        tipo_pav = c_tipo.selectbox("Tipo", opcoes_pav, index=idx_tipo, format_func=rotulo_pav,
-                                    key=f"pav_tipo_{torre}")
-        cobertura = c_cob.selectbox("Cobertura", opcoes_pav, index=idx_cob,
-                                    format_func=rotulo_pav, key=f"pav_cob_{torre}")
-
-        escolhidos = [n for n in (terreo, tipo_pav, cobertura) if n is not None]
-        if len(set(escolhidos)) < len(escolhidos):
-            st.error(f"Torre {torre}: o mesmo pavimento foi escolhido duas vezes.")
-            st.stop()
-        if terreo is not None:
-            categoria_pav[(torre, terreo)] = "Pilotis ou com subsolo" if pilotis else "Térreo"
-        if tipo_pav is not None:
-            categoria_pav[(torre, tipo_pav)] = "Tipo"
-        if cobertura is not None:
-            categoria_pav[(torre, cobertura)] = "Cobertura"
-
+    categoria_pav = {
+        (t, int(p)): EXPOSICOES[e]
+        for a, t, p, e in zip(pavs_ed["Avaliar"], pavs_ed["Torre"],
+                              pavs_ed["Pavimento"], pavs_ed["Exposição"])
+        if a
+    }
     info_uh["Categoria"] = [
         categoria_pav.get((t, p)) for t, p in zip(info_uh["Torre"], info_uh["Pavimento"])
     ]
     info_uh = info_uh[info_uh["Categoria"].notna()]
     if info_uh.empty:
-        st.warning("Escolha ao menos um pavimento.")
+        st.warning("Marque ao menos um pavimento.")
         st.stop()
 else:
     info_uh["Torre"] = "-"
@@ -1055,18 +1066,25 @@ zona_para_uh = dict(zip(tabela_apps["Zona"], tabela_apps["UH"]))
 # ---------------------------------------------------------------------------
 st.subheader("Dados de cada UH")
 if usa_sql:
-    st.caption(
-        "A área foi somada a partir das áreas de piso das zonas de cada UH "
-        "(tabela Zones do SQL). Confira se corresponde à área útil."
-    )
-colunas_uh = ["UH", "Torre", "Categoria", "Área útil (m²)"] if multifamiliar \
+    st.caption("Área útil = soma das áreas de piso dos APPs de cada UH (tabela Zones do SQL).")
+    area_app = {}
+    for a in apps:
+        uh_app = zona_para_uh[a.zona]
+        area_app[uh_app] = area_app.get(uh_app, 0.0) + float(geo.loc[a.zona, "FloorArea"])
+    info_uh["Área útil (m²)"] = [round(area_app.get(uh, 0.0), 2) for uh in info_uh.index]
+else:
+    info_uh["Área útil (m²)"] = 0.0
+colunas_uh = ["UH", "Torre", "Pavimento", "Categoria", "Área útil (m²)"] if multifamiliar \
     else ["UH", "Área útil (m²)"]
+tabela_dados_uh = info_uh.reset_index()[colunas_uh]
+if multifamiliar:
+    tabela_dados_uh["Categoria"] = tabela_dados_uh["Categoria"].map(ROTULO_EXPOSICAO)
 dados_uh = st.data_editor(
-    info_uh.reset_index()[colunas_uh],
+    tabela_dados_uh,
     hide_index=True, width="stretch", key="ed_dados_uh",
-    disabled=["UH", "Torre", "Categoria"],
+    disabled=["UH", "Torre", "Pavimento", "Categoria"],
     column_config={
-        "Categoria": st.column_config.TextColumn("Pavimento"),
+        "Categoria": st.column_config.TextColumn("Exposição"),
         "Área útil (m²)": st.column_config.NumberColumn(min_value=0.0, step=0.5, format="%.2f"),
     },
 ).set_index("UH")
@@ -1158,7 +1176,8 @@ else:
     resumo = pd.DataFrame([
         {
             "Torre": info_uh.loc[uh, "Torre"],
-            "Pavimento": info_uh.loc[uh, "Categoria"],
+            "Pavimento": info_uh.loc[uh, "Pavimento"],
+            "Exposição": ROTULO_EXPOSICAO[info_uh.loc[uh, "Categoria"]],
             "UH": uh,
             "Nível": cls.nivel,
             "PHFT ref": round(ref.phft * 100, 2),
