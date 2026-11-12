@@ -1066,16 +1066,16 @@ zona_para_uh = dict(zip(tabela_apps["Zona"], tabela_apps["UH"]))
 # ---------------------------------------------------------------------------
 st.subheader("Dados de cada UH")
 if usa_sql:
-    st.caption("Área útil = soma das áreas de piso dos APPs de cada UH (tabela Zones do SQL).")
+    st.caption("Soma das áreas de piso dos APPs de cada UH (Ap,UH), lida da tabela Zones do SQL.")
     area_app = {}
     for a in apps:
         uh_app = zona_para_uh[a.zona]
         area_app[uh_app] = area_app.get(uh_app, 0.0) + float(geo.loc[a.zona, "FloorArea"])
-    info_uh["Área útil (m²)"] = [round(area_app.get(uh, 0.0), 2) for uh in info_uh.index]
+    info_uh["Área dos APPs (m²)"] = [round(area_app.get(uh, 0.0), 2) for uh in info_uh.index]
 else:
-    info_uh["Área útil (m²)"] = 0.0
-colunas_uh = ["UH", "Torre", "Pavimento", "Categoria", "Área útil (m²)"] if multifamiliar \
-    else ["UH", "Área útil (m²)"]
+    info_uh["Área dos APPs (m²)"] = 0.0
+colunas_uh = ["UH", "Torre", "Pavimento", "Categoria", "Área dos APPs (m²)"] if multifamiliar \
+    else ["UH", "Área dos APPs (m²)"]
 tabela_dados_uh = info_uh.reset_index()[colunas_uh]
 if multifamiliar:
     tabela_dados_uh["Categoria"] = tabela_dados_uh["Categoria"].map(ROTULO_EXPOSICAO)
@@ -1085,15 +1085,15 @@ dados_uh = st.data_editor(
     disabled=["UH", "Torre", "Pavimento", "Categoria"],
     column_config={
         "Categoria": st.column_config.TextColumn("Exposição"),
-        "Área útil (m²)": st.column_config.NumberColumn(min_value=0.0, step=0.5, format="%.2f"),
+        "Área dos APPs (m²)": st.column_config.NumberColumn(min_value=0.0, step=0.5, format="%.2f"),
     },
 ).set_index("UH")
-areas_uh = dados_uh["Área útil (m²)"].fillna(0.0).to_dict()
+areas_uh = dados_uh["Área dos APPs (m²)"].fillna(0.0).to_dict()
 
 uhs = [uh for uh in info_uh.index if any(zona_para_uh[a.zona] == uh for a in apps)]
 sem_area = [uh for uh in uhs if areas_uh.get(uh, 0) <= 0]
 if sem_area:
-    st.error("Informe a área útil de: " + ", ".join(sem_area))
+    st.error("Informe a área dos APPs de: " + ", ".join(sem_area))
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -1172,6 +1172,40 @@ if len(resultados_por_uh) == 1:
     exibir_resultados_uh(res_ref, res_real, cls)
 else:
     st.divider()
+    st.subheader("Resultado geral")
+    st.caption(
+        "A NBR 15575-1 classifica cada UH, e todas as UH dos pavimentos avaliados "
+        "devem ser consideradas. A edificação (ou torre) atinge um nível quando todas "
+        "as suas UH avaliadas atingem esse nível - ou seja, vale o menor nível entre elas."
+    )
+    ORDEM_NIVEIS = ["Não atende ao nível mínimo", "Mínimo", "Intermediário", "Superior"]
+    niveis_uh = pd.DataFrame({
+        "Torre": [info_uh.loc[uh, "Torre"] for uh in resultados_por_uh],
+        "Nível": [cls.nivel for _, _, cls in resultados_por_uh.values()],
+    })
+
+    def linha_geral(rotulo, grupo):
+        contagem = grupo["Nível"].value_counts()
+        menor = min(grupo["Nível"], key=ORDEM_NIVEIS.index)
+        return {
+            "": rotulo,
+            "UHs avaliadas": len(grupo),
+            **{n: int(contagem.get(n, 0)) for n in reversed(ORDEM_NIVEIS)},
+            "Nível": menor,
+        }
+
+    nivel_edificacao = min(niveis_uh["Nível"], key=ORDEM_NIVEIS.index)
+    if nivel_edificacao == ORDEM_NIVEIS[0]:
+        st.error(f"Edificação: {nivel_edificacao}")
+    else:
+        st.success(f"Edificação: nível {nivel_edificacao}")
+
+    linhas = []
+    if multifamiliar and niveis_uh["Torre"].nunique() > 1:
+        linhas = [linha_geral(f"Torre {t}", g) for t, g in niveis_uh.groupby("Torre")]
+    linhas.append(linha_geral("Edificação", niveis_uh))
+    st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
+
     st.subheader("Resultado por UH")
     resumo = pd.DataFrame([
         {
